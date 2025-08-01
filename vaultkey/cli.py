@@ -12,6 +12,7 @@ from .manager import PasswordManager
 from .generator import generate_password
 from .strength import PasswordStrength, format_strength_bar
 from .breach import BreachChecker
+from .portability import VaultImporter, VaultExporter
 
 # Initialize password manager with default vault file
 DEFAULT_VAULT = os.path.expanduser("~/.vaultkey/passwords.encrypted")
@@ -735,6 +736,208 @@ def breaches(site, verbose):
         sys.exit(1)
     finally:
         pm.lock()
+
+
+@cli.command(name = 'import')
+@click.option('--file', '-f', required=True, type=click.Path(exists=True), help='File to import')
+@click.option('--format', '-F', required=True, 
+              type=click.Choice(['csv', 'lastpass', 'bitwarden', '1password', 'chrome', 'keepass', 'vaultkey']),
+              help='Import file format')
+@click.option('--dry-run', is_flag=True, help='Preview import without saving')
+@click.option('--merge', is_flag=True, help='Merge with existing passwords (default: skip duplicates)')
+def import_passwords(file, format, dry_run, merge):
+    """Import passwords from another password manager"""
+    pm = get_password_manager()
+    importer = VaultImporter()
+    
+    click.echo(f"\n📥 Importing passwords from {format} file: {file}")
+    
+    # Special handling for encrypted vaultkey format
+    import_master_password = None
+    if format == 'vaultkey':
+        import_master_password = getpass.getpass("Enter password for the backup file: ")
+    
+    try:
+        # Import the passwords
+        imported_passwords = importer.import_file(file, format, import_master_password)
+        
+        if not imported_passwords:
+            click.echo("❌ No passwords found in import file")
+            return
+        
+        click.echo(f"\n📊 Found {len(imported_passwords)} password(s) to import")
+        
+        # Show preview
+        if dry_run or click.confirm("\nShow preview?"):
+            click.echo("\nPasswords to import:")
+            for site, data in list(imported_passwords.items())[:10]:
+                click.echo(f"  • {site} ({data['username']})")
+            if len(imported_passwords) > 10:
+                click.echo(f"  ... and {len(imported_passwords) - 10} more")
+        
+        if dry_run:
+            click.echo("\n✅ Dry run complete. No passwords were imported.")
+            return
+        
+        # Unlock vault for actual import
+        if not click.confirm("\nProceed with import?"):
+            click.echo("❌ Import cancelled")
+            return
+        
+        master_password = prompt_master_password()
+        if not master_password or not pm.unlock(master_password):
+            click.echo("❌ Invalid master password!", err=True)
+            sys.exit(1)
+        
+        # Process imports
+        imported_count = 0
+        skipped_count = 0
+        updated_count = 0
+        
+        for site, data in imported_passwords.items():
+            existing = pm.get_password(site)
+            
+            if existing:
+                if merge:
+                    # Update existing password
+                    pm.update_password(
+                        site,
+                        new_password=data['password'],
+                        new_username=data['username'],
+                        new_notes=data.get('notes')
+                    )
+                    updated_count += 1
+                    click.echo(f"  ↻ Updated: {site}")
+                else:
+                    skipped_count += 1
+                    if skipped_count <= 5:  # Show first 5 skipped
+                        click.echo(f"  ⏭️  Skipped (already exists): {site}")
+            else:
+                # Add new password
+                pm.add_password(
+                    site,
+                    data['username'],
+                    data['password'],
+                    data.get('notes', '')
+                )
+                imported_count += 1
+                if imported_count <= 5:  # Show first 5 imported
+                    click.echo(f"  ✅ Imported: {site}")
+        
+        # Summary
+        click.echo(f"\n📊 Import Summary:")
+        click.echo(f"  ✅ Imported: {imported_count} password(s)")
+        if updated_count > 0:
+            click.echo(f"  ↻ Updated: {updated_count} password(s)")
+        if skipped_count > 0:
+            click.echo(f"  ⏭️  Skipped: {skipped_count} password(s)")
+        
+        click.echo(f"\n✅ Import complete!")
+        
+    except Exception as e:
+        click.echo(f"❌ Import failed: {e}", err=True)
+        sys.exit(1)
+    finally:
+        if pm.is_unlocked():
+            pm.lock()
+
+
+@cli.command()
+@click.option('--format', '-F', required=True,
+              type=click.Choice(['csv', 'json', 'vaultkey', 'lastpass', 'bitwarden']),
+              help='Export format')
+@click.option('--output', '-o', type=click.Path(), help='Output file (prints to screen if not specified)')
+@click.option('--site', '-s', help='Export specific site only')
+def export(format, output, site):
+    """Export passwords to various formats"""
+    pm = get_password_manager()
+    exporter = VaultExporter()
+    
+    # Unlock vault
+    master_password = prompt_master_password()
+    if not master_password or not pm.unlock(master_password):
+        click.echo("❌ Invalid master password!", err=True)
+        sys.exit(1)
+    
+    try:
+        # Get passwords to export
+        if site:
+            creds = pm.get_password(site)
+            if not creds:
+                click.echo(f"❌ No password found for '{site}'", err=True)
+                return
+            passwords_to_export = {site: creds}
+        else:
+            # Export all passwords
+            passwords_to_export = {}
+            for site_name in pm.list_sites():
+                passwords_to_export[site_name] = pm.get_password(site_name)
+        
+        if not passwords_to_export:
+            click.echo("❌ No passwords to export")
+            return
+        
+        click.echo(f"\n📤 Exporting {len(passwords_to_export)} password(s) to {format} format")
+        
+        # Handle encrypted export
+        export_password = None
+        if format == 'vaultkey':
+            click.echo("\n🔐 Encrypted export requires a password.")
+            click.echo("This can be the same as your master password or different.")
+            export_password = prompt_master_password(confirm=True)
+            if not export_password:
+                return
+        
+        # Perform export
+        result = exporter.export_passwords(
+            passwords_to_export,
+            format,
+            output,
+            export_password
+        )
+        
+        if output:
+            click.echo(f"✅ {result}")
+            
+            # Security reminder for unencrypted formats
+            if format != 'vaultkey':
+                click.echo("\n⚠️  WARNING: This export contains unencrypted passwords!")
+                click.echo("   Keep this file secure and delete it after use.")
+        else:
+            # Output to screen
+            click.echo("\n" + "="*60)
+            click.echo(result)
+            click.echo("="*60)
+            
+            if format != 'vaultkey':
+                click.echo("\n⚠️  WARNING: Passwords shown above are unencrypted!")
+        
+    except Exception as e:
+        click.echo(f"❌ Export failed: {e}", err=True)
+        sys.exit(1)
+    finally:
+        pm.lock()
+
+@cli.command()
+def formats():
+    """List supported import/export formats"""
+    importer = VaultImporter()
+    
+    click.echo("\n📥 Supported Import Formats:\n")
+    for fmt, description in importer.SUPPORTED_FORMATS.items():
+        click.echo(f"  • {fmt:12} - {description}")
+    
+    click.echo("\n📤 Supported Export Formats:\n")
+    click.echo("  • csv         - Generic CSV format")
+    click.echo("  • json        - JSON format (unencrypted)")
+    click.echo("  • vaultkey    - VaultKey encrypted backup")
+    click.echo("  • lastpass    - LastPass CSV format")
+    click.echo("  • bitwarden   - Bitwarden CSV format")
+    
+    click.echo("\n💡 Tips:")
+    click.echo("  - Use 'vaultkey' format for secure backups")
+    click.echo("  - CSV/JSON exports are unencrypted - handle with care!")
+    click.echo("  - Import preserves original creation dates where possible")
 
 
 if __name__ == '__main__':
