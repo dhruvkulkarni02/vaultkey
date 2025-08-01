@@ -1,15 +1,76 @@
-# VaultKey 🔐
+## Usage Examples
+
+### Basic Usage
+```bash
+# Create a new vault
+vk init
+
+# Add passwords
+vk add -s github.com -u developer@email.com -g
+vk add -s gmail.com -u myemail@gmail.com
+
+# Retrieve passwords
+vk get -s github --show
+vk get -s gmail --copy  # Copy to clipboard
+
+# List and search
+vk list
+vk list -f git  # Filter by 'git'
+```
+
+### Security Features
+```bash
+# Check password strength
+vk check -p "MyP@ssw0rd123"
+
+# Audit all passwords
+vk audit -v
+
+# Check for breached passwords
+vk breaches
+vk breaches -s github.com  # Check specific site
+
+# Full security audit
+vk audit -b -v  # Audit with breach checking and verbose output
+```
+
+### Password Generation
+```bash
+# Generate passwords with different options
+vk generate -l 24                    # 24 characters
+vk generate --no-symbols             # No special characters
+vk generate --no-ambiguous           # Avoid confusing characters
+vk generate -c 5                     # Generate 5 passwords
+```# VaultKey 🔐
 
 A secure, locally-encrypted password manager built from scratch with a focus on security best practices and zero-knowledge architecture.
 
 ## Features
 
+### Core Security
 - **Strong Encryption**: AES-256 encryption using the `cryptography` library
 - **Secure Key Derivation**: PBKDF2 with 100,000 iterations for master password
-- **Password Generation**: Cryptographically secure random password generation
 - **Zero-Knowledge**: Your master password never leaves your device
 - **Local Storage**: All data stored locally in encrypted format
 - **Cross-Platform**: Works on Windows, macOS, and Linux
+
+### Password Management
+- **Password Generation**: Cryptographically secure random password generation
+- **Smart Search**: Find passwords with partial site name matching
+- **Password History**: Track creation and modification dates
+- **Secure Notes**: Add notes to your password entries
+
+### Security Analysis
+- **Password Strength Analyzer**: Real-time strength scoring and feedback
+- **Entropy Calculation**: Mathematical randomness measurement
+- **Pattern Detection**: Identifies common patterns and sequences
+- **Time-to-Crack Estimates**: Based on modern GPU capabilities
+
+### Breach Detection
+- **HaveIBeenPwned Integration**: Check if passwords appear in data breaches
+- **K-Anonymity Protocol**: Never sends your full password hash
+- **Severity Classification**: Categorizes risk levels (safe to critical)
+- **Batch Checking**: Efficiently scan all passwords at once
 
 ## Security Overview
 
@@ -20,12 +81,19 @@ VaultKey implements several security best practices:
 - Cryptographically secure random number generation for passwords
 - Salted key derivation to prevent rainbow table attacks
 - Secure memory handling to minimize sensitive data exposure
+- Password strength analysis with actionable feedback
+- Breach detection using k-anonymity to protect your passwords
 
 ## Installation
 
 ### Prerequisites
 - Python 3.8 or higher
 - pip package manager
+
+### Dependencies
+- `cryptography` - For encryption operations
+- `click` - For the command-line interface
+- `requests` - For breach detection API calls
 
 ### Setup
 
@@ -71,6 +139,18 @@ python vaultkey.py update --site github.com
 
 # Delete a password
 python vaultkey.py delete --site github.com
+
+# Check password strength
+python vaultkey.py check --password "test123"
+
+# Audit all passwords
+python vaultkey.py audit --verbose
+
+# Check for breached passwords
+python vaultkey.py breaches
+
+# Full security audit with breach checking
+python vaultkey.py audit --check-breaches
 ```
 
 ### Python API
@@ -105,14 +185,17 @@ vaultkey/
 │   ├── storage.py         # Persistent storage handling
 │   ├── generator.py       # Password generation utilities
 │   ├── strength.py        # Password strength analysis
-│   └── cli.py            # Command-line interface
+│   ├── breach.py          # Breach detection with HIBP
+│   ├── manager.py         # Main password manager class
+│   └── cli.py             # Command-line interface
 ├── tests/
 │   ├── test_crypto.py     # Encryption tests
 │   ├── test_storage.py    # Storage tests
-│   └── test_generator.py  # Generator tests
+│   ├── test_generator.py  # Generator tests
+│   └── test_strength.py   # Strength analysis tests
 ├── docs/
 │   ├── security.md        # Security documentation
-│   └── api.md            # API documentation
+│   └── api.md             # API documentation
 ├── requirements.txt
 ├── requirements-dev.txt
 ├── setup.py
@@ -133,6 +216,9 @@ pytest
 
 # Run with coverage
 pytest --cov=vaultkey tests/
+
+# Run specific test file
+pytest tests/test_strength.py
 ```
 
 ### Contributing
@@ -149,17 +235,27 @@ If you discover a security vulnerability, please email [your-email] instead of o
 
 ## Roadmap
 
+### Completed ✅
 - [x] Core encryption functionality
 - [x] Command-line interface
 - [x] Password generation
-- [ ] Password strength analysis
+- [x] Password strength analysis
+- [x] Breach detection (HaveIBeenPwned)
+- [x] Security auditing
+
+### In Progress 🚧
+- [ ] Two-factor authentication for vault
 - [ ] Import from other password managers
 - [ ] Export functionality
+
+### Planned 📋
 - [ ] GUI application
 - [ ] Browser extension
-- [ ] Two-factor authentication
+- [ ] Password history tracking
 - [ ] Secure password sharing
 - [ ] Cloud sync with end-to-end encryption
+- [ ] Biometric unlock (TouchID/FaceID)
+- [ ] Emergency access features
 
 ## License
 
