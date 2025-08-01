@@ -1,0 +1,14 @@
+LICENSE
+README.md
+setup.py
+vaultkey/__init__.py
+vaultkey/crypto.py
+vaultkey/generator.py
+vaultkey/manager.py
+vaultkey/storage.py
+vaultkey.egg-info/PKG-INFO
+vaultkey.egg-info/SOURCES.txt
+vaultkey.egg-info/dependency_links.txt
+vaultkey.egg-info/entry_points.txt
+vaultkey.egg-info/requires.txt
+vaultkey.egg-info/top_level.txt
