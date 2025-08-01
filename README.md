@@ -1,2 +1,180 @@
-# vaultkey
-🔐 A secure, locally-encrypted password manager built with Python. Features strong encryption, password generation, and zero-knowledge architecture.
+# VaultKey 🔐
+
+A secure, locally-encrypted password manager built from scratch with a focus on security best practices and zero-knowledge architecture.
+
+## Features
+
+- **Strong Encryption**: AES-256 encryption using the `cryptography` library
+- **Secure Key Derivation**: PBKDF2 with 100,000 iterations for master password
+- **Password Generation**: Cryptographically secure random password generation
+- **Zero-Knowledge**: Your master password never leaves your device
+- **Local Storage**: All data stored locally in encrypted format
+- **Cross-Platform**: Works on Windows, macOS, and Linux
+
+## Security Overview
+
+VaultKey implements several security best practices:
+
+- Master passwords are never stored, only the derived encryption key
+- All passwords are encrypted using Fernet (AES-128 in CBC mode with HMAC)
+- Cryptographically secure random number generation for passwords
+- Salted key derivation to prevent rainbow table attacks
+- Secure memory handling to minimize sensitive data exposure
+
+## Installation
+
+### Prerequisites
+- Python 3.8 or higher
+- pip package manager
+
+### Setup
+
+1. Clone the repository:
+```bash
+git clone https://github.com/yourusername/vaultkey.git
+cd vaultkey
+```
+
+2. Create a virtual environment (recommended):
+```bash
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+```
+
+3. Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+## Usage
+
+### Command Line Interface
+
+```bash
+# First time setup - create your master password
+python vaultkey.py init
+
+# Add a new password
+python vaultkey.py add --site github.com --username myusername
+
+# Retrieve a password
+python vaultkey.py get --site github.com
+
+# Generate a secure password
+python vaultkey.py generate --length 20
+
+# List all stored sites
+python vaultkey.py list
+
+# Update an existing password
+python vaultkey.py update --site github.com
+
+# Delete a password
+python vaultkey.py delete --site github.com
+```
+
+### Python API
+
+```python
+from vaultkey import PasswordManager
+
+# Initialize the password manager
+pm = PasswordManager()
+pm.unlock("your-master-password")
+
+# Add a password
+pm.add_password("github.com", "username", "password123")
+
+# Generate and store a secure password
+secure_pass = pm.generate_password(length=20)
+pm.add_password("example.com", "user@example.com", secure_pass)
+
+# Retrieve a password
+creds = pm.get_password("github.com")
+print(f"Username: {creds['username']}")
+print(f"Password: {creds['password']}")
+```
+
+## Project Structure
+
+```
+vaultkey/
+├── vaultkey/
+│   ├── __init__.py
+│   ├── crypto.py          # Encryption/decryption logic
+│   ├── storage.py         # Persistent storage handling
+│   ├── generator.py       # Password generation utilities
+│   ├── strength.py        # Password strength analysis
+│   └── cli.py            # Command-line interface
+├── tests/
+│   ├── test_crypto.py     # Encryption tests
+│   ├── test_storage.py    # Storage tests
+│   └── test_generator.py  # Generator tests
+├── docs/
+│   ├── security.md        # Security documentation
+│   └── api.md            # API documentation
+├── requirements.txt
+├── requirements-dev.txt
+├── setup.py
+├── LICENSE
+└── README.md
+```
+
+## Development
+
+### Running Tests
+
+```bash
+# Install dev dependencies
+pip install -r requirements-dev.txt
+
+# Run all tests
+pytest
+
+# Run with coverage
+pytest --cov=vaultkey tests/
+```
+
+### Contributing
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+### Security Considerations
+
+If you discover a security vulnerability, please email [your-email] instead of opening a public issue.
+
+## Roadmap
+
+- [x] Core encryption functionality
+- [x] Command-line interface
+- [x] Password generation
+- [ ] Password strength analysis
+- [ ] Import from other password managers
+- [ ] Export functionality
+- [ ] GUI application
+- [ ] Browser extension
+- [ ] Two-factor authentication
+- [ ] Secure password sharing
+- [ ] Cloud sync with end-to-end encryption
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Acknowledgments
+
+- Built using the [cryptography](https://cryptography.io/) library
+- Inspired by security best practices from OWASP
+- Password strength algorithms based on zxcvbn
+
+## Disclaimer
+
+This password manager is a personal project built for educational purposes. While it implements security best practices, it has not undergone professional security auditing. For production use, consider established password managers that have been thoroughly audited.
+
+---
+
+**Remember**: Use a strong master password and never share it with anyone!
