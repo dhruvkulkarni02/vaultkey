@@ -7,6 +7,10 @@ import getpass
 import sys
 import os
 from typing import Optional
+from tabulate import tabulate
+from datetime import datetime
+import threading
+import time
 
 from .manager import PasswordManager
 from .generator import generate_password
@@ -206,9 +210,13 @@ def get(site, show, copy):
 @cli.command()
 @click.option('--filter', '-f', help='Filter sites by search term')
 @click.option('--verbose', '-v', is_flag=True, help='Show more details')
-def list(filter, verbose):
-    """List all stored passwords"""
+@click.option('--sort', '-s', type=click.Choice(['site', 'username', 'modified', 'strength']), 
+              default='site', help='Sort by column')
+@click.option('--weak-only', '-w', is_flag=True, help='Show only weak passwords')
+def list(filter, verbose, sort, weak_only):
+    """List all stored passwords in a table"""
     pm = get_password_manager()
+    analyzer = PasswordStrength() if (weak_only or sort == 'strength') else None
     
     # Unlock vault
     password = prompt_master_password()
@@ -229,22 +237,130 @@ def list(filter, verbose):
             click.echo("  (No passwords stored)")
             return
         
-        # Display sites
+        # Prepare data for table
+        table_data = []
+        
         for site in sites:
+            info = pm.get_password(site)
+            
+            # Calculate password strength if needed
+            strength_score = None
+            if analyzer:
+                analysis = analyzer.analyze(info['password'])
+                strength_score = analysis['score']
+                
+                # Skip if filtering for weak only
+                if weak_only and strength_score >= 40:
+                    continue
+            
+            # Calculate age
+            try:
+                modified = datetime.fromisoformat(info.get('modified', ''))
+                age_days = (datetime.now() - modified).days
+                if age_days == 0:
+                    age_str = "Today"
+                elif age_days == 1:
+                    age_str = "Yesterday"
+                elif age_days < 30:
+                    age_str = f"{age_days}d ago"
+                elif age_days < 365:
+                    age_str = f"{age_days // 30}mo ago"
+                else:
+                    age_str = f"{age_days // 365}y ago"
+                sort_age = age_days
+            except:
+                age_str = "Unknown"
+                sort_age = 9999
+            
+            # Prepare row data
+            row_data = {
+                'site': site,
+                'username': info['username'],
+                'modified': age_str,
+                'sort_age': sort_age,
+                'password_length': len(info['password'])
+            }
+            
+            if analyzer:
+                row_data['strength'] = strength_score
+            
             if verbose:
-                info = pm.get_password(site)
-                click.echo(f"\n  🌐 {click.style(site, bold=True)}")
-                click.echo(f"     👤 {info['username']}")
-                if info.get('notes'):
-                    click.echo(f"     📝 {info['notes']}")
-                if info.get('modified'):
-                    click.echo(f"     📅 Modified: {info['modified'][:10]}")
+                row_data['notes'] = info.get('notes', '')[:40] + '...' if len(info.get('notes', '')) > 40 else info.get('notes', '')
+                row_data['created'] = info.get('created', '')[:10] if info.get('created') else 'Unknown'
+                # Check if has history
+                history = pm.get_password_history(site)
+                row_data['history'] = f"{len(history)} changes" if history else "No history"
+            
+            table_data.append(row_data)
+        
+        if not table_data:
+            if weak_only:
+                click.echo("  ✅ No weak passwords found!")
             else:
-                info = pm.get_password(site)
-                click.echo(f"  • {site} ({info['username']})")
+                click.echo("  (No passwords match criteria)")
+            return
+        
+        # Sort data
+        if sort == 'site':
+            table_data.sort(key=lambda x: x['site'].lower())
+        elif sort == 'username':
+            table_data.sort(key=lambda x: x['username'].lower())
+        elif sort == 'modified':
+            table_data.sort(key=lambda x: x['sort_age'])
+        elif sort == 'strength' and analyzer:
+            table_data.sort(key=lambda x: x.get('strength', 0))
+        
+        # Prepare display table
+        headers = ['Site', 'Username', 'Length', 'Modified']
+        display_data = []
+        
+        if analyzer:
+            headers.insert(3, 'Strength')
+        
+        if verbose:
+            headers.extend(['Created', 'History', 'Notes'])
+        
+        for row in table_data:
+            display_row = [
+                row['site'],
+                row['username'],
+                str(row['password_length']),
+                row['modified']
+            ]
+            
+            if analyzer:
+                # Create strength bar
+                score = row.get('strength', 0)
+                if score >= 80:
+                    strength_bar = click.style('████████', fg='green')
+                elif score >= 60:
+                    strength_bar = click.style('██████', fg='yellow')
+                elif score >= 40:
+                    strength_bar = click.style('████', fg='yellow')
+                else:
+                    strength_bar = click.style('██', fg='red')
+                display_row.insert(3, strength_bar)
+            
+            if verbose:
+                display_row.extend([
+                    row.get('created', 'Unknown'),
+                    row.get('history', 'No history'),
+                    row.get('notes', '')
+                ])
+            
+            display_data.append(display_row)
+        
+        # Display table
+        click.echo()
+        click.echo(tabulate(display_data, headers=headers, tablefmt='simple_grid'))
         
         # Summary
-        click.echo(f"\n📊 Total: {len(sites)} password(s)")
+        click.echo(f"\n📊 Total: {len(table_data)} password(s)")
+        
+        if analyzer and not weak_only:
+            weak_count = sum(1 for r in table_data if r.get('strength', 100) < 40)
+            if weak_count > 0:
+                click.echo(f"⚠️  {weak_count} weak password(s) - run 'vk list --weak-only' to see them")
         
     except Exception as e:
         click.echo(f"❌ Error: {e}", err=True)
@@ -322,6 +438,13 @@ def update(site, new_password, new_username, generate, length):
                 return
         elif not new_password and not new_username:
             new_password = getpass.getpass("New password (leave empty to keep current): ")
+        
+        # Check for password reuse
+        if new_password and pm.check_password_reuse(site, new_password):
+            click.echo("\n⚠️  Warning: This password was previously used for this site!")
+            if not click.confirm("Use it anyway?"):
+                click.echo("❌ Update cancelled")
+                return
         
         # Update
         if pm.update_password(site, new_password=new_password or None, 
@@ -490,30 +613,42 @@ def audit(site, verbose, check_breaches):
                 for suggestion in analysis['suggestions']:
                     click.echo(f"  • {suggestion}")
         
-        # Summary
+        # Summary with table
         click.echo(f"\n{'='*60}")
         click.echo("\n📊 Summary Report\n")
         click.echo(f"Total passwords audited: {total_passwords}")
-        click.echo("\nStrength distribution:")
         
+        # Create distribution table
+        click.echo("\nStrength distribution:")
+        distribution_data = []
         for strength, count in strength_counts.items():
             if count > 0:
                 percentage = (count / total_passwords) * 100
                 label = strength.replace('_', ' ').title()
+                
+                # Create visual bar
                 bar_length = int(percentage / 5)
                 bar = '█' * bar_length
                 
                 # Color based on strength
                 if strength == 'very_strong':
-                    color = 'green'
+                    colored_bar = click.style(bar, fg='green')
                 elif strength == 'strong':
-                    color = 'yellow'
+                    colored_bar = click.style(bar, fg='yellow')
                 elif strength == 'fair':
-                    color = 'yellow'
+                    colored_bar = click.style(bar, fg='yellow')
                 else:
-                    color = 'red'
+                    colored_bar = click.style(bar, fg='red')
                 
-                click.echo(f"  {label:12} [{count:2}]: {click.style(bar, fg=color)} {percentage:.0f}%")
+                distribution_data.append([
+                    label,
+                    count,
+                    f"{percentage:.1f}%",
+                    colored_bar
+                ])
+        
+        headers = ['Strength Level', 'Count', 'Percentage', 'Distribution']
+        click.echo(tabulate(distribution_data, headers=headers, tablefmt='simple'))
         
         # Overall security score
         weights = {
@@ -527,12 +662,42 @@ def audit(site, verbose, check_breaches):
         
         click.echo(f"\nOverall security score: {format_strength_bar(int(overall_score))}")
         
-        # Recommendations
+        # Show weak passwords in a table if any
         if strength_counts['weak'] > 0 or strength_counts['very_weak'] > 0:
-            click.echo("\n🚨 Critical: You have weak passwords that should be updated immediately!")
-            weak_sites = [s for s in sites if analyzer.analyze(pm.get_password(s)['password'])['score'] < 40]
-            for ws in weak_sites[:5]:  # Show max 5
-                click.echo(f"  • {ws}")
+            click.echo("\n🚨 Critical: Weak passwords requiring immediate attention:\n")
+            
+            weak_table_data = []
+            weak_sites = []
+            
+            for s in sites:
+                score = analyzer.analyze(pm.get_password(s)['password'])['score']
+                if score < 40:
+                    weak_sites.append((s, score))
+            
+            # Sort by score (weakest first)
+            weak_sites.sort(key=lambda x: x[1])
+            
+            for site, score in weak_sites[:10]:  # Show max 10
+                creds = pm.get_password(site)
+                if score < 20:
+                    strength = click.style('██', fg='red')
+                    level = 'Very Weak'
+                else:
+                    strength = click.style('████', fg='red')
+                    level = 'Weak'
+                
+                weak_table_data.append([
+                    site,
+                    creds['username'],
+                    strength,
+                    level
+                ])
+            
+            headers = ['Site', 'Username', 'Strength', 'Level']
+            click.echo(tabulate(weak_table_data, headers=headers, tablefmt='simple_grid'))
+            
+            if len(weak_sites) > 10:
+                click.echo(f"\n... and {len(weak_sites) - 10} more weak passwords")
         
         if issues_found and verbose:
             click.echo("\n📋 All issues found:")
@@ -559,9 +724,25 @@ def audit(site, verbose, check_breaches):
             ]
             
             if critical_breaches:
-                click.echo("\n🚨 Passwords requiring immediate attention:")
-                for site, result in critical_breaches[:10]:  # Max 10
-                    click.echo(f"  • {site}: {result['message']}")
+                click.echo("\n🚨 Passwords found in data breaches:\n")
+                
+                breach_table_data = []
+                for site, result in critical_breaches[:10]:
+                    creds = pm.get_password(site)
+                    severity_emoji = {
+                        'critical': '🚨',
+                        'high': '❗'
+                    }.get(result['severity'], '⚠️')
+                    
+                    breach_table_data.append([
+                        f"{severity_emoji} {site}",
+                        creds['username'],
+                        f"{result['count']:,} exposures",
+                        result['severity'].title()
+                    ])
+                
+                headers = ['Site', 'Username', 'Exposures', 'Severity']
+                click.echo(tabulate(breach_table_data, headers=headers, tablefmt='simple_grid'))
             
     except Exception as e:
         click.echo(f"❌ Error: {e}", err=True)
@@ -737,210 +918,6 @@ def breaches(site, verbose):
     finally:
         pm.lock()
 
-# Import/export commands
-@cli.command(name = 'import')
-@click.option('--file', '-f', required=True, type=click.Path(exists=True), help='File to import')
-@click.option('--format', '-F', required=True, 
-              type=click.Choice(['csv', 'lastpass', 'bitwarden', '1password', 'chrome', 'keepass', 'vaultkey']),
-              help='Import file format')
-@click.option('--dry-run', is_flag=True, help='Preview import without saving')
-@click.option('--merge', is_flag=True, help='Merge with existing passwords (default: skip duplicates)')
-def import_passwords(file, format, dry_run, merge):
-    """Import passwords from another password manager"""
-    pm = get_password_manager()
-    importer = VaultImporter()
-    
-    click.echo(f"\n📥 Importing passwords from {format} file: {file}")
-    
-    # Special handling for encrypted vaultkey format
-    import_master_password = None
-    if format == 'vaultkey':
-        import_master_password = getpass.getpass("Enter password for the backup file: ")
-    
-    try:
-        # Import the passwords
-        imported_passwords = importer.import_file(file, format, import_master_password)
-        
-        if not imported_passwords:
-            click.echo("❌ No passwords found in import file")
-            return
-        
-        click.echo(f"\n📊 Found {len(imported_passwords)} password(s) to import")
-        
-        # Show preview
-        if dry_run or click.confirm("\nShow preview?"):
-            click.echo("\nPasswords to import:")
-            for site, data in list(imported_passwords.items())[:10]:
-                click.echo(f"  • {site} ({data['username']})")
-            if len(imported_passwords) > 10:
-                click.echo(f"  ... and {len(imported_passwords) - 10} more")
-        
-        if dry_run:
-            click.echo("\n✅ Dry run complete. No passwords were imported.")
-            return
-        
-        # Unlock vault for actual import
-        if not click.confirm("\nProceed with import?"):
-            click.echo("❌ Import cancelled")
-            return
-        
-        master_password = prompt_master_password()
-        if not master_password or not pm.unlock(master_password):
-            click.echo("❌ Invalid master password!", err=True)
-            sys.exit(1)
-        
-        # Process imports
-        imported_count = 0
-        skipped_count = 0
-        updated_count = 0
-        
-        for site, data in imported_passwords.items():
-            existing = pm.get_password(site)
-            
-            if existing:
-                if merge:
-                    # Update existing password
-                    pm.update_password(
-                        site,
-                        new_password=data['password'],
-                        new_username=data['username'],
-                        new_notes=data.get('notes')
-                    )
-                    updated_count += 1
-                    click.echo(f"  ↻ Updated: {site}")
-                else:
-                    skipped_count += 1
-                    if skipped_count <= 5:  # Show first 5 skipped
-                        click.echo(f"  ⏭️  Skipped (already exists): {site}")
-            else:
-                # Add new password
-                pm.add_password(
-                    site,
-                    data['username'],
-                    data['password'],
-                    data.get('notes', '')
-                )
-                imported_count += 1
-                if imported_count <= 5:  # Show first 5 imported
-                    click.echo(f"  ✅ Imported: {site}")
-        
-        # Summary
-        click.echo(f"\n📊 Import Summary:")
-        click.echo(f"  ✅ Imported: {imported_count} password(s)")
-        if updated_count > 0:
-            click.echo(f"  ↻ Updated: {updated_count} password(s)")
-        if skipped_count > 0:
-            click.echo(f"  ⏭️  Skipped: {skipped_count} password(s)")
-        
-        click.echo(f"\n✅ Import complete!")
-        
-    except Exception as e:
-        click.echo(f"❌ Import failed: {e}", err=True)
-        sys.exit(1)
-    finally:
-        if pm.is_unlocked():
-            pm.lock()
-
-
-@cli.command()
-@click.option('--format', '-F', required=True,
-              type=click.Choice(['csv', 'json', 'vaultkey', 'lastpass', 'bitwarden']),
-              help='Export format')
-@click.option('--output', '-o', type=click.Path(), help='Output file (prints to screen if not specified)')
-@click.option('--site', '-s', help='Export specific site only')
-def export(format, output, site):
-    """Export passwords to various formats"""
-    pm = get_password_manager()
-    exporter = VaultExporter()
-    
-    # Unlock vault
-    master_password = prompt_master_password()
-    if not master_password or not pm.unlock(master_password):
-        click.echo("❌ Invalid master password!", err=True)
-        sys.exit(1)
-    
-    try:
-        # Get passwords to export
-        if site:
-            creds = pm.get_password(site)
-            if not creds:
-                click.echo(f"❌ No password found for '{site}'", err=True)
-                return
-            passwords_to_export = {site: creds}
-        else:
-            # Export all passwords
-            passwords_to_export = {}
-            for site_name in pm.list_sites():
-                passwords_to_export[site_name] = pm.get_password(site_name)
-        
-        if not passwords_to_export:
-            click.echo("❌ No passwords to export")
-            return
-        
-        click.echo(f"\n📤 Exporting {len(passwords_to_export)} password(s) to {format} format")
-        
-        # Handle encrypted export
-        export_password = None
-        if format == 'vaultkey':
-            click.echo("\n🔐 Encrypted export requires a password.")
-            click.echo("This can be the same as your master password or different.")
-            export_password = prompt_master_password(confirm=True)
-            if not export_password:
-                return
-        
-        # Perform export
-        result = exporter.export_passwords(
-            passwords_to_export,
-            format,
-            output,
-            export_password
-        )
-        
-        if output:
-            click.echo(f"✅ {result}")
-            
-            # Security reminder for unencrypted formats
-            if format != 'vaultkey':
-                click.echo("\n⚠️  WARNING: This export contains unencrypted passwords!")
-                click.echo("   Keep this file secure and delete it after use.")
-        else:
-            # Output to screen
-            click.echo("\n" + "="*60)
-            click.echo(result)
-            click.echo("="*60)
-            
-            if format != 'vaultkey':
-                click.echo("\n⚠️  WARNING: Passwords shown above are unencrypted!")
-        
-    except Exception as e:
-        click.echo(f"❌ Export failed: {e}", err=True)
-        sys.exit(1)
-    finally:
-        pm.lock()
-
-@cli.command()
-def formats():
-    """List supported import/export formats"""
-    importer = VaultImporter()
-    
-    click.echo("\n📥 Supported Import Formats:\n")
-    for fmt, description in importer.SUPPORTED_FORMATS.items():
-        click.echo(f"  • {fmt:12} - {description}")
-    
-    click.echo("\n📤 Supported Export Formats:\n")
-    click.echo("  • csv         - Generic CSV format")
-    click.echo("  • json        - JSON format (unencrypted)")
-    click.echo("  • vaultkey    - VaultKey encrypted backup")
-    click.echo("  • lastpass    - LastPass CSV format")
-    click.echo("  • bitwarden   - Bitwarden CSV format")
-    
-    click.echo("\n💡 Tips:")
-    click.echo("  - Use 'vaultkey' format for secure backups")
-    click.echo("  - CSV/JSON exports are unencrypted - handle with care!")
-    click.echo("  - Import preserves original creation dates where possible")
-
-#Password history management
-# Add these commands to your cli.py file after the other commands
 
 @cli.command()
 @click.option('--site', '-s', required=True, help='Website or service name')
@@ -1176,6 +1153,356 @@ def history_stats(include_current):
             
             if not reuse_found:
                 click.echo("  ✅ No password reuse detected")
+        
+    except Exception as e:
+        click.echo(f"❌ Error: {e}", err=True)
+        sys.exit(1)
+    finally:
+        pm.lock()
+
+
+@cli.command(name = 'import')
+@click.option('--file', '-f', required=True, type=click.Path(exists=True), help='File to import')
+@click.option('--format', '-F', required=True, 
+              type=click.Choice(['csv', 'lastpass', 'bitwarden', '1password', 'chrome', 'keepass', 'vaultkey']),
+              help='Import file format')
+@click.option('--dry-run', is_flag=True, help='Preview import without saving')
+@click.option('--merge', is_flag=True, help='Merge with existing passwords (default: skip duplicates)')
+def import_passwords(file, format, dry_run, merge):
+    """Import passwords from another password manager"""
+    pm = get_password_manager()
+    importer = VaultImporter()
+    
+    click.echo(f"\n📥 Importing passwords from {format} file: {file}")
+    
+    # Special handling for encrypted vaultkey format
+    import_master_password = None
+    if format == 'vaultkey':
+        import_master_password = getpass.getpass("Enter password for the backup file: ")
+    
+    try:
+        # Import the passwords
+        imported_passwords = importer.import_file(file, format, import_master_password)
+        
+        if not imported_passwords:
+            click.echo("❌ No passwords found in import file")
+            return
+        
+        click.echo(f"\n📊 Found {len(imported_passwords)} password(s) to import")
+        
+        # Show preview
+        if dry_run or click.confirm("\nShow preview?"):
+            click.echo("\nPasswords to import:")
+            count = 0
+            for site, data in imported_passwords.items():
+                if count >= 10:
+                    break
+                try:
+                    # Sanitize the output to handle special characters
+                    safe_site = str(site).encode('utf-8', 'replace').decode('utf-8')
+                    safe_username = str(data.get('username', '')).encode('utf-8', 'replace').decode('utf-8')
+                    # Use simple dash instead of bullet point to avoid Unicode issues
+                    click.echo(f"  - {safe_site} ({safe_username})")
+                    count += 1
+                except Exception as e:
+                    # If there's still an error, show a placeholder
+                    click.echo(f"  - [Entry {count + 1}: Unable to display]")
+                    count += 1
+            
+            if len(imported_passwords) > 10:
+                click.echo(f"  ... and {len(imported_passwords) - 10} more")
+        
+        if dry_run:
+            click.echo("\n✅ Dry run complete. No passwords were imported.")
+            return
+        
+        # Unlock vault for actual import
+        if not click.confirm("\nProceed with import?"):
+            click.echo("❌ Import cancelled")
+            return
+        
+        master_password = prompt_master_password()
+        if not master_password or not pm.unlock(master_password):
+            click.echo("❌ Invalid master password!", err=True)
+            sys.exit(1)
+        
+        # Process imports
+        imported_count = 0
+        skipped_count = 0
+        updated_count = 0
+        
+        for site, data in imported_passwords.items():
+            existing = pm.get_password(site)
+            
+            if existing:
+                if merge:
+                    # Update existing password
+                    pm.update_password(
+                        site,
+                        new_password=data['password'],
+                        new_username=data['username'],
+                        new_notes=data.get('notes')
+                    )
+                    updated_count += 1
+                    click.echo(f"  ↻ Updated: {site}")
+                else:
+                    skipped_count += 1
+                    if skipped_count <= 5:  # Show first 5 skipped
+                        click.echo(f"  ⏭️  Skipped (already exists): {site}")
+            else:
+                # Add new password
+                pm.add_password(
+                    site,
+                    data['username'],
+                    data['password'],
+                    data.get('notes', '')
+                )
+                imported_count += 1
+                if imported_count <= 5:  # Show first 5 imported
+                    click.echo(f"  ✅ Imported: {site}")
+        
+        # Summary
+        click.echo(f"\n📊 Import Summary:")
+        click.echo(f"  ✅ Imported: {imported_count} password(s)")
+        if updated_count > 0:
+            click.echo(f"  ↻ Updated: {updated_count} password(s)")
+        if skipped_count > 0:
+            click.echo(f"  ⏭️  Skipped: {skipped_count} password(s)")
+        
+        click.echo(f"\n✅ Import complete!")
+        
+    except Exception as e:
+        click.echo(f"❌ Import failed: {e}", err=True)
+        sys.exit(1)
+    finally:
+        if pm.is_unlocked():
+            pm.lock()
+
+
+@cli.command()
+@click.option('--format', '-F', required=True,
+              type=click.Choice(['csv', 'json', 'vaultkey', 'lastpass', 'bitwarden']),
+              help='Export format')
+@click.option('--output', '-o', type=click.Path(), help='Output file (prints to screen if not specified)')
+@click.option('--site', '-s', help='Export specific site only')
+def export(format, output, site):
+    """Export passwords to various formats"""
+    pm = get_password_manager()
+    exporter = VaultExporter()
+    
+    # Unlock vault
+    master_password = prompt_master_password()
+    if not master_password or not pm.unlock(master_password):
+        click.echo("❌ Invalid master password!", err=True)
+        sys.exit(1)
+    
+    try:
+        # Get passwords to export
+        if site:
+            creds = pm.get_password(site)
+            if not creds:
+                click.echo(f"❌ No password found for '{site}'", err=True)
+                return
+            passwords_to_export = {site: creds}
+        else:
+            # Export all passwords
+            passwords_to_export = {}
+            for site_name in pm.list_sites():
+                passwords_to_export[site_name] = pm.get_password(site_name)
+        
+        if not passwords_to_export:
+            click.echo("❌ No passwords to export")
+            return
+        
+        click.echo(f"\n📤 Exporting {len(passwords_to_export)} password(s) to {format} format")
+        
+        # Handle encrypted export
+        export_password = None
+        if format == 'vaultkey':
+            click.echo("\n🔐 Encrypted export requires a password.")
+            click.echo("This can be the same as your master password or different.")
+            export_password = prompt_master_password(confirm=True)
+            if not export_password:
+                return
+        
+        # Perform export
+        result = exporter.export_passwords(
+            passwords_to_export,
+            format,
+            output,
+            export_password
+        )
+        
+        if output:
+            click.echo(f"✅ {result}")
+            
+            # Security reminder for unencrypted formats
+            if format != 'vaultkey':
+                click.echo("\n⚠️  WARNING: This export contains unencrypted passwords!")
+                click.echo("   Keep this file secure and delete it after use.")
+        else:
+            # Output to screen
+            click.echo("\n" + "="*60)
+            click.echo(result)
+            click.echo("="*60)
+            
+            if format != 'vaultkey':
+                click.echo("\n⚠️  WARNING: Passwords shown above are unencrypted!")
+        
+    except Exception as e:
+        click.echo(f"❌ Export failed: {e}", err=True)
+        sys.exit(1)
+    finally:
+        pm.lock()
+
+
+@cli.command()
+def formats():
+    """List supported import/export formats"""
+    importer = VaultImporter()
+    
+    click.echo("\n📥 Supported Import Formats:\n")
+    for fmt, description in importer.SUPPORTED_FORMATS.items():
+        click.echo(f"  • {fmt:12} - {description}")
+    
+    click.echo("\n📤 Supported Export Formats:\n")
+    click.echo("  • csv         - Generic CSV format")
+    click.echo("  • json        - JSON format (unencrypted)")
+    click.echo("  • vaultkey    - VaultKey encrypted backup")
+    click.echo("  • lastpass    - LastPass CSV format")
+    click.echo("  • bitwarden   - Bitwarden CSV format")
+    
+    click.echo("\n💡 Tips:")
+    click.echo("  - Use 'vaultkey' format for secure backups")
+    click.echo("  - CSV/JSON exports are unencrypted - handle with care!")
+    click.echo("  - Import preserves original creation dates where possible")
+
+
+@cli.command()
+@click.argument('query')
+@click.option('--type', '-t', type=click.Choice(['all', 'weak', 'strong', 'breached', 'old', 'recent']), 
+              default='all', help='Filter by type')
+@click.option('--show-passwords', '-p', is_flag=True, help='Show passwords in results')
+def search(query, type, show_passwords):
+    """Search passwords by site, username, or notes"""
+    pm = get_password_manager()
+    analyzer = PasswordStrength()
+    
+    # Unlock vault
+    password = prompt_master_password()
+    if not password or not pm.unlock(password):
+        click.echo("❌ Invalid master password!", err=True)
+        sys.exit(1)
+    
+    try:
+        query_lower = query.lower()
+        results = []
+        
+        # Search through all passwords
+        for site in pm.list_sites():
+            data = pm.get_password(site)
+            
+            # Check if query matches site, username, or notes
+            if (query_lower in site.lower() or 
+                query_lower in data.get('username', '').lower() or 
+                query_lower in data.get('notes', '').lower()):
+                
+                # Get password strength
+                analysis = analyzer.analyze(data['password'])
+                strength_score = analysis['score']
+                
+                # Calculate age
+                try:
+                    modified = datetime.fromisoformat(data.get('modified', ''))
+                    age_days = (datetime.now() - modified).days
+                    if age_days == 0:
+                        age_str = "Today"
+                    elif age_days == 1:
+                        age_str = "Yesterday"
+                    elif age_days < 30:
+                        age_str = f"{age_days} days ago"
+                    elif age_days < 365:
+                        age_str = f"{age_days // 30} months ago"
+                    else:
+                        age_str = f"{age_days // 365} years ago"
+                except:
+                    age_str = "Unknown"
+                    age_days = 9999
+                
+                # Apply type filter
+                if type == 'weak' and strength_score >= 60:
+                    continue
+                elif type == 'strong' and strength_score < 60:
+                    continue
+                elif type == 'old' and age_days < 90:
+                    continue
+                elif type == 'recent' and age_days > 30:
+                    continue
+                
+                # Add to results
+                result = {
+                    'site': site,
+                    'username': data.get('username', ''),
+                    'password': data['password'] if show_passwords else '•' * len(data['password']),
+                    'strength': strength_score,
+                    'modified': age_str,
+                    'notes': data.get('notes', '')[:30] + '...' if len(data.get('notes', '')) > 30 else data.get('notes', '')
+                }
+                results.append(result)
+        
+        if not results:
+            click.echo(f"No passwords found matching '{query}'")
+            return
+        
+        # Sort by relevance (exact matches first)
+        results.sort(key=lambda x: (
+            query_lower not in x['site'].lower(),  # Exact site matches first
+            x['site'].lower()
+        ))
+        
+        click.echo(f"\n🔍 Found {len(results)} password(s) matching '{query}'")
+        
+        if type != 'all':
+            click.echo(f"   Filtered by: {type}")
+        
+        click.echo()
+        
+        # Prepare table data
+        headers = ['Site', 'Username', 'Strength', 'Modified']
+        if show_passwords:
+            headers.insert(2, 'Password')
+        if any(r['notes'] for r in results):
+            headers.append('Notes')
+        
+        table_data = []
+        for r in results:
+            # Create strength bar
+            score = r['strength']
+            if score >= 80:
+                strength_bar = click.style('████████', fg='green')
+            elif score >= 60:
+                strength_bar = click.style('██████', fg='yellow')
+            elif score >= 40:
+                strength_bar = click.style('████', fg='yellow')
+            else:
+                strength_bar = click.style('██', fg='red')
+            
+            row = [r['site'], r['username'], strength_bar, r['modified']]
+            if show_passwords:
+                row.insert(2, r['password'])
+            if any(res['notes'] for res in results):
+                row.append(r['notes'])
+            
+            table_data.append(row)
+        
+        # Display results in a table
+        click.echo(tabulate(table_data, headers=headers, tablefmt='simple_grid'))
+        
+        # Show summary
+        if len(results) > 1:
+            weak_count = sum(1 for r in results if r['strength'] < 40)
+            if weak_count > 0:
+                click.echo(f"\n⚠️  {weak_count} weak password(s) found - consider updating them")
         
     except Exception as e:
         click.echo(f"❌ Error: {e}", err=True)
