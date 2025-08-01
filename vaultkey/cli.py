@@ -11,6 +11,7 @@ from typing import Optional
 from .manager import PasswordManager
 from .generator import generate_password
 from .strength import PasswordStrength, format_strength_bar
+from .breach import BreachChecker
 
 # Initialize password manager with default vault file
 DEFAULT_VAULT = os.path.expanduser("~/.vaultkey/passwords.encrypted")
@@ -443,12 +444,17 @@ def audit(site, verbose, check_breaches):
             'very_weak': 0
         }
         issues_found = []
+        passwords_for_breach_check = {}
         
         # Analyze each password
         for site_name in sites:
             creds = pm.get_password(site_name)
             analysis = analyzer.analyze(creds['password'])
             strength_counts[analysis['strength']] += 1
+            
+            # Store for breach checking
+            if check_breaches:
+                passwords_for_breach_check[site_name] = creds['password']
             
             # Display results
             click.echo(f"\n{'='*60}")
@@ -532,10 +538,29 @@ def audit(site, verbose, check_breaches):
             for site_name, issue in issues_found[:10]:  # Show max 10
                 click.echo(f"  • {site_name}: {issue}")
         
-        # Breach checking placeholder
+        # Breach checking
         if check_breaches:
-            click.echo("\n🔐 Breach Checking")
-            click.echo("  (Breach checking will be implemented next)")
+            click.echo("\n🔐 Checking passwords against breach database...")
+            click.echo("(Using HaveIBeenPwned API with k-anonymity)")
+            
+            checker = BreachChecker()
+            breach_results = checker.check_multiple(passwords_for_breach_check)
+            breach_stats = checker.get_breach_statistics(breach_results)
+            
+            click.echo("\n📊 Breach Check Results:")
+            for line in checker.format_breach_summary(breach_stats):
+                click.echo(f"  {line}")
+            
+            # Show critical breaches
+            critical_breaches = [
+                (site, result) for site, result in breach_results.items()
+                if not result.get('error') and result.get('severity') in ['critical', 'high']
+            ]
+            
+            if critical_breaches:
+                click.echo("\n🚨 Passwords requiring immediate attention:")
+                for site, result in critical_breaches[:10]:  # Max 10
+                    click.echo(f"  • {site}: {result['message']}")
             
     except Exception as e:
         click.echo(f"❌ Error: {e}", err=True)
@@ -546,7 +571,8 @@ def audit(site, verbose, check_breaches):
 
 @cli.command()
 @click.option('--password', '-p', help='Password to check (will prompt if not provided)')
-def check(password):
+@click.option('--check-breach', '-b', is_flag=True, help='Also check if password has been breached')
+def check(password, check_breach):
     """Check the strength of a password without saving it"""
     analyzer = PasswordStrength()
     
@@ -581,6 +607,134 @@ def check(password):
         improved = analyzer.suggest_improvement(password)
         if improved != password:
             click.echo(f"\n🔧 Example improvement: {improved}")
+    
+    # Check breaches if requested
+    if check_breach:
+        click.echo("\n🔐 Checking breach database...")
+        checker = BreachChecker()
+        breach_result = checker.check_password(password)
+        
+        if breach_result.get('error'):
+            click.echo(f"❌ {breach_result['message']}")
+        else:
+            if breach_result['found']:
+                severity_emoji = {
+                    'low': '📌',
+                    'medium': '⚠️',
+                    'high': '❗',
+                    'critical': '🚨'
+                }.get(breach_result['severity'], '❓')
+                
+                click.echo(f"\n{severity_emoji} Breach Status:")
+                click.echo(f"  {breach_result['message']}")
+                click.echo(f"  💡 {breach_result['recommendation']}")
+            else:
+                click.echo(f"\n✅ {breach_result['message']}")
+
+
+@cli.command()
+@click.option('--site', '-s', help='Check specific site (or all if not specified)')
+@click.option('--verbose', '-v', is_flag=True, help='Show detailed results')
+def breaches(site, verbose):
+    """Check if passwords have been exposed in data breaches"""
+    pm = get_password_manager()
+    checker = BreachChecker()
+    
+    # Unlock vault
+    password = prompt_master_password()
+    if not password or not pm.unlock(password):
+        click.echo("❌ Invalid master password!", err=True)
+        sys.exit(1)
+    
+    try:
+        click.echo("\n🔍 Breach Detection Report")
+        click.echo("Using HaveIBeenPwned API (k-anonymity protected)\n")
+        
+        # Get passwords to check
+        passwords_to_check = {}
+        if site:
+            creds = pm.get_password(site)
+            if not creds:
+                click.echo(f"❌ No password found for '{site}'", err=True)
+                return
+            passwords_to_check[site] = creds['password']
+        else:
+            # Check all passwords
+            for site_name in pm.list_sites():
+                creds = pm.get_password(site_name)
+                passwords_to_check[site_name] = creds['password']
+        
+        if not passwords_to_check:
+            click.echo("No passwords to check.")
+            return
+        
+        # Check breaches
+        click.echo(f"Checking {len(passwords_to_check)} password(s)...\n")
+        results = checker.check_multiple(passwords_to_check)
+        
+        # Display results
+        breached_sites = []
+        safe_sites = []
+        
+        for site_name, result in results.items():
+            if result.get('error'):
+                click.echo(f"❌ {site_name}: {result['message']}")
+            elif result['found']:
+                breached_sites.append((site_name, result))
+                
+                severity_emoji = {
+                    'low': '📌',
+                    'medium': '⚠️',
+                    'high': '❗',
+                    'critical': '🚨'
+                }.get(result['severity'], '❓')
+                
+                click.echo(f"{severity_emoji} {click.style(site_name, bold=True)}")
+                click.echo(f"   {result['message']}")
+                click.echo(f"   💡 {result['recommendation']}")
+                
+                if verbose:
+                    click.echo(f"   Hash prefix checked: {result['hash_prefix']}...")
+                
+                click.echo()
+            else:
+                safe_sites.append(site_name)
+        
+        # Show safe passwords
+        if safe_sites:
+            click.echo(f"\n✅ Safe passwords ({len(safe_sites)}):")
+            if verbose or len(safe_sites) <= 10:
+                for site_name in safe_sites:
+                    click.echo(f"   • {site_name}")
+            else:
+                # Show first 5 and last 5
+                for site_name in safe_sites[:5]:
+                    click.echo(f"   • {site_name}")
+                if len(safe_sites) > 10:
+                    click.echo(f"   ... and {len(safe_sites) - 10} more")
+                for site_name in safe_sites[-5:]:
+                    click.echo(f"   • {site_name}")
+        
+        # Summary
+        stats = checker.get_breach_statistics(results)
+        click.echo(f"\n{'='*50}")
+        click.echo("📊 Summary:")
+        for line in checker.format_breach_summary(stats):
+            click.echo(f"   {line}")
+        
+        # Recommendations
+        if breached_sites:
+            click.echo("\n💡 Recommendations:")
+            click.echo("   1. Change all breached passwords immediately")
+            click.echo("   2. Use unique passwords for each account")
+            click.echo("   3. Enable two-factor authentication where possible")
+            click.echo("   4. Run 'vk generate' to create strong passwords")
+            
+    except Exception as e:
+        click.echo(f"❌ Error: {e}", err=True)
+        sys.exit(1)
+    finally:
+        pm.lock()
 
 
 if __name__ == '__main__':
