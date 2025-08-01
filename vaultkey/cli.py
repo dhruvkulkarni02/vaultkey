@@ -737,7 +737,7 @@ def breaches(site, verbose):
     finally:
         pm.lock()
 
-
+# Import/export commands
 @cli.command(name = 'import')
 @click.option('--file', '-f', required=True, type=click.Path(exists=True), help='File to import')
 @click.option('--format', '-F', required=True, 
@@ -939,6 +939,249 @@ def formats():
     click.echo("  - CSV/JSON exports are unencrypted - handle with care!")
     click.echo("  - Import preserves original creation dates where possible")
 
+#Password history management
+# Add these commands to your cli.py file after the other commands
+
+@cli.command()
+@click.option('--site', '-s', required=True, help='Website or service name')
+@click.option('--show-passwords', '-p', is_flag=True, help='Show actual passwords (hidden by default)')
+def history(site, show_passwords):
+    """View password history for a site"""
+    pm = get_password_manager()
+    
+    # Unlock vault
+    password = prompt_master_password()
+    if not password or not pm.unlock(password):
+        click.echo("❌ Invalid master password!", err=True)
+        sys.exit(1)
+    
+    try:
+        # Get current password info
+        current = pm.get_password(site)
+        if not current:
+            click.echo(f"❌ No password found for '{site}'", err=True)
+            return
+        
+        # Get history
+        history_entries = pm.get_password_history(site)
+        
+        click.echo(f"\n📜 Password History for {click.style(site, bold=True)}\n")
+        
+        # Show current password
+        click.echo("Current password:")
+        if show_passwords:
+            click.echo(f"  🔑 {click.style(current['password'], fg='green')}")
+        else:
+            click.echo(f"  🔑 {'*' * len(current['password'])}")
+        click.echo(f"  📅 Last modified: {current.get('modified', 'Unknown')[:10]}")
+        
+        if not history_entries:
+            click.echo("\nNo password history recorded.")
+        else:
+            click.echo(f"\nPrevious passwords ({len(history_entries)} total):")
+            
+            # Show history in reverse order (most recent first)
+            for i, hist in enumerate(reversed(history_entries), 1):
+                click.echo(f"\n{i}. Previous password:")
+                if show_passwords:
+                    click.echo(f"   🔑 {hist['password']}")
+                else:
+                    click.echo(f"   🔑 {'*' * len(hist['password'])}")
+                
+                changed_date = hist.get('changed', 'Unknown')
+                retired_date = hist.get('retired', 'Unknown')
+                
+                if changed_date != 'Unknown':
+                    click.echo(f"   📅 Used from: {changed_date[:10]}")
+                if retired_date != 'Unknown':
+                    click.echo(f"   📅 Retired on: {retired_date[:10]}")
+                
+                # Calculate how long ago
+                try:
+                    from datetime import datetime
+                    retired = datetime.fromisoformat(retired_date)
+                    days_ago = (datetime.now() - retired).days
+                    if days_ago == 0:
+                        click.echo(f"   ⏰ Retired today")
+                    elif days_ago == 1:
+                        click.echo(f"   ⏰ Retired yesterday")
+                    else:
+                        click.echo(f"   ⏰ Retired {days_ago} days ago")
+                except:
+                    pass
+        
+    except Exception as e:
+        click.echo(f"❌ Error: {e}", err=True)
+        sys.exit(1)
+    finally:
+        pm.lock()
+
+
+@cli.command(name='clear-history')
+@click.option('--site', '-s', help='Clear history for specific site (or all if not specified)')
+@click.option('--force', '-f', is_flag=True, help='Skip confirmation')
+def clear_history(site, force):
+    """Clear password history"""
+    pm = get_password_manager()
+    
+    # Unlock vault
+    password = prompt_master_password()
+    if not password or not pm.unlock(password):
+        click.echo("❌ Invalid master password!", err=True)
+        sys.exit(1)
+    
+    try:
+        if site:
+            # Check if site exists
+            if not pm.get_password(site):
+                click.echo(f"❌ No password found for '{site}'", err=True)
+                return
+            
+            history_count = len(pm.get_password_history(site))
+            if history_count == 0:
+                click.echo(f"No history to clear for {site}")
+                return
+            
+            click.echo(f"⚠️  About to clear {history_count} historical password(s) for {site}")
+        else:
+            # Count total history entries
+            total_history = 0
+            for site_name in pm.list_sites():
+                total_history += len(pm.get_password_history(site_name))
+            
+            if total_history == 0:
+                click.echo("No history to clear")
+                return
+            
+            click.echo(f"⚠️  About to clear ALL password history ({total_history} entries)")
+        
+        if not force and not click.confirm("Are you sure?"):
+            click.echo("❌ Cancelled")
+            return
+        
+        # Clear history
+        cleared = pm.clear_history(site)
+        
+        if site:
+            click.echo(f"✅ Cleared {cleared} historical password(s) for {site}")
+        else:
+            click.echo(f"✅ Cleared {cleared} historical password(s) across all sites")
+        
+    except Exception as e:
+        click.echo(f"❌ Error: {e}", err=True)
+        sys.exit(1)
+    finally:
+        pm.lock()
+
+
+@cli.command(name='history-stats')
+@click.option('--include-current', '-c', is_flag=True, help='Include current passwords in analysis')
+def history_stats(include_current):
+    """Show password history statistics"""
+    pm = get_password_manager()
+    
+    # Unlock vault
+    password = prompt_master_password()
+    if not password or not pm.unlock(password):
+        click.echo("❌ Invalid master password!", err=True)
+        sys.exit(1)
+    
+    try:
+        vault_info = pm.get_vault_info()
+        
+        click.echo("\n📊 Password History Statistics\n")
+        
+        # Overall stats
+        click.echo(f"Total sites: {vault_info['password_count']}")
+        click.echo(f"Total history entries: {vault_info['history_entries']}")
+        click.echo(f"History tracking: {'Enabled' if vault_info['history_enabled'] else 'Disabled'}")
+        
+        # Per-site stats
+        sites_with_history = 0
+        max_history_site = None
+        max_history_count = 0
+        total_changes = 0
+        
+        # Analyze each site
+        for site in pm.list_sites():
+            history = pm.get_password_history(site)
+            if history:
+                sites_with_history += 1
+                total_changes += len(history)
+                
+                if len(history) > max_history_count:
+                    max_history_count = len(history)
+                    max_history_site = site
+        
+        click.echo(f"\nSites with history: {sites_with_history}")
+        
+        if max_history_site:
+            click.echo(f"Most changed password: {max_history_site} ({max_history_count} changes)")
+        
+        if sites_with_history > 0:
+            avg_changes = total_changes / sites_with_history
+            click.echo(f"Average changes per site: {avg_changes:.1f}")
+        
+        # Find recently changed passwords
+        click.echo("\n🕐 Recently changed passwords:")
+        recent_changes = []
+        
+        for site in pm.list_sites():
+            site_data = pm.get_password(site)
+            if site_data.get('modified'):
+                try:
+                    from datetime import datetime
+                    modified = datetime.fromisoformat(site_data['modified'])
+                    days_ago = (datetime.now() - modified).days
+                    
+                    if days_ago <= 30:  # Changed in last 30 days
+                        recent_changes.append((site, days_ago))
+                except:
+                    pass
+        
+        if recent_changes:
+            recent_changes.sort(key=lambda x: x[1])
+            for site, days in recent_changes[:5]:  # Show top 5
+                if days == 0:
+                    click.echo(f"  • {site} - changed today")
+                elif days == 1:
+                    click.echo(f"  • {site} - changed yesterday")
+                else:
+                    click.echo(f"  • {site} - changed {days} days ago")
+        else:
+            click.echo("  No recent changes")
+        
+        # Check for potential reuse
+        if include_current:
+            click.echo("\n🔄 Checking for password reuse...")
+            passwords_seen = {}
+            reuse_found = False
+            
+            for site in pm.list_sites():
+                current = pm.get_password(site)
+                pwd = current['password']
+                
+                if pwd in passwords_seen:
+                    if not reuse_found:
+                        click.echo("  ⚠️  Same password used on multiple sites:")
+                        reuse_found = True
+                    click.echo(f"     • {site} and {passwords_seen[pwd]}")
+                else:
+                    passwords_seen[pwd] = site
+                
+                # Check history too
+                for hist in pm.get_password_history(site):
+                    if hist['password'] == current['password']:
+                        click.echo(f"  ⚠️  {site} - current password was used before!")
+            
+            if not reuse_found:
+                click.echo("  ✅ No password reuse detected")
+        
+    except Exception as e:
+        click.echo(f"❌ Error: {e}", err=True)
+        sys.exit(1)
+    finally:
+        pm.lock()
 
 if __name__ == '__main__':
     try:
