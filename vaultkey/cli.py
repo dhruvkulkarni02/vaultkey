@@ -10,6 +10,7 @@ from typing import Optional
 
 from .manager import PasswordManager
 from .generator import generate_password
+from .strength import PasswordStrength, format_strength_bar
 
 # Initialize password manager with default vault file
 DEFAULT_VAULT = os.path.expanduser("~/.vaultkey/passwords.encrypted")
@@ -399,6 +400,187 @@ def info():
         sys.exit(1)
     finally:
         pm.lock()
+
+
+@cli.command()
+@click.option('--site', '-s', help='Check specific site (or all if not specified)')
+@click.option('--verbose', '-v', is_flag=True, help='Show detailed analysis')
+@click.option('--check-breaches', '-b', is_flag=True, help='Check against known breaches')
+def audit(site, verbose, check_breaches):
+    """Audit password strength and security"""
+    pm = get_password_manager()
+    analyzer = PasswordStrength()
+    
+    # Unlock vault
+    password = prompt_master_password()
+    if not password or not pm.unlock(password):
+        click.echo("❌ Invalid master password!", err=True)
+        sys.exit(1)
+    
+    try:
+        click.echo("\n🔍 Security Audit Report\n")
+        
+        # Get sites to audit
+        if site:
+            sites = [site] if pm.get_password(site) else []
+            if not sites:
+                click.echo(f"❌ No password found for '{site}'", err=True)
+                return
+        else:
+            sites = pm.list_sites()
+        
+        if not sites:
+            click.echo("No passwords to audit.")
+            return
+        
+        # Statistics
+        total_passwords = len(sites)
+        strength_counts = {
+            'very_strong': 0,
+            'strong': 0,
+            'fair': 0,
+            'weak': 0,
+            'very_weak': 0
+        }
+        issues_found = []
+        
+        # Analyze each password
+        for site_name in sites:
+            creds = pm.get_password(site_name)
+            analysis = analyzer.analyze(creds['password'])
+            strength_counts[analysis['strength']] += 1
+            
+            # Display results
+            click.echo(f"\n{'='*60}")
+            click.echo(f"🌐 {click.style(site_name, bold=True)}")
+            click.echo(f"👤 {creds['username']}")
+            click.echo(f"💪 Strength: {format_strength_bar(analysis['score'])}")
+            click.echo(f"📊 Level: {analysis['strength'].replace('_', ' ').title()}")
+            
+            if verbose:
+                click.echo(f"🔢 Entropy: {analysis['entropy']} bits")
+                click.echo(f"⏱️  Time to crack: {analyzer.get_time_to_crack(analysis['entropy'])}")
+                
+                # Show character composition
+                checks = analysis['checks']
+                click.echo("\nCharacter types:")
+                click.echo(f"  • Length: {checks['length']} characters")
+                click.echo(f"  • Lowercase: {'✓' if checks['has_lowercase'] else '✗'}")
+                click.echo(f"  • Uppercase: {'✓' if checks['has_uppercase'] else '✗'}")
+                click.echo(f"  • Numbers: {'✓' if checks['has_digits'] else '✗'}")
+                click.echo(f"  • Symbols: {'✓' if checks['has_symbols'] else '✗'}")
+            
+            # Show issues
+            if analysis['feedback']:
+                click.echo("\n⚠️  Issues:")
+                for issue in analysis['feedback']:
+                    click.echo(f"  • {issue}")
+                    issues_found.append((site_name, issue))
+            
+            # Show suggestions
+            if analysis['suggestions'] and (verbose or analysis['score'] < 60):
+                click.echo("\n💡 Suggestions:")
+                for suggestion in analysis['suggestions']:
+                    click.echo(f"  • {suggestion}")
+        
+        # Summary
+        click.echo(f"\n{'='*60}")
+        click.echo("\n📊 Summary Report\n")
+        click.echo(f"Total passwords audited: {total_passwords}")
+        click.echo("\nStrength distribution:")
+        
+        for strength, count in strength_counts.items():
+            if count > 0:
+                percentage = (count / total_passwords) * 100
+                label = strength.replace('_', ' ').title()
+                bar_length = int(percentage / 5)
+                bar = '█' * bar_length
+                
+                # Color based on strength
+                if strength == 'very_strong':
+                    color = 'green'
+                elif strength == 'strong':
+                    color = 'yellow'
+                elif strength == 'fair':
+                    color = 'yellow'
+                else:
+                    color = 'red'
+                
+                click.echo(f"  {label:12} [{count:2}]: {click.style(bar, fg=color)} {percentage:.0f}%")
+        
+        # Overall security score
+        weights = {
+            'very_strong': 100,
+            'strong': 80,
+            'fair': 60,
+            'weak': 40,
+            'very_weak': 20
+        }
+        overall_score = sum(weights[s] * c for s, c in strength_counts.items()) / total_passwords
+        
+        click.echo(f"\nOverall security score: {format_strength_bar(int(overall_score))}")
+        
+        # Recommendations
+        if strength_counts['weak'] > 0 or strength_counts['very_weak'] > 0:
+            click.echo("\n🚨 Critical: You have weak passwords that should be updated immediately!")
+            weak_sites = [s for s in sites if analyzer.analyze(pm.get_password(s)['password'])['score'] < 40]
+            for ws in weak_sites[:5]:  # Show max 5
+                click.echo(f"  • {ws}")
+        
+        if issues_found and verbose:
+            click.echo("\n📋 All issues found:")
+            for site_name, issue in issues_found[:10]:  # Show max 10
+                click.echo(f"  • {site_name}: {issue}")
+        
+        # Breach checking placeholder
+        if check_breaches:
+            click.echo("\n🔐 Breach Checking")
+            click.echo("  (Breach checking will be implemented next)")
+            
+    except Exception as e:
+        click.echo(f"❌ Error: {e}", err=True)
+        sys.exit(1)
+    finally:
+        pm.lock()
+
+
+@cli.command()
+@click.option('--password', '-p', help='Password to check (will prompt if not provided)')
+def check(password):
+    """Check the strength of a password without saving it"""
+    analyzer = PasswordStrength()
+    
+    if not password:
+        password = getpass.getpass("Password to check: ")
+    
+    click.echo("\n🔍 Password Strength Analysis\n")
+    
+    results = analyzer.analyze(password)
+    
+    # Don't show the actual password
+    masked = password[0] + '*' * (len(password) - 2) + password[-1] if len(password) > 2 else '*' * len(password)
+    click.echo(f"Password: {masked}")
+    click.echo(f"Length: {len(password)} characters")
+    click.echo(f"\nStrength: {format_strength_bar(results['score'])}")
+    click.echo(f"Level: {results['strength'].replace('_', ' ').title()}")
+    click.echo(f"Entropy: {results['entropy']} bits")
+    click.echo(f"Time to crack: {analyzer.get_time_to_crack(results['entropy'])}")
+    
+    if results['feedback']:
+        click.echo("\n⚠️  Issues:")
+        for issue in results['feedback']:
+            click.echo(f"  • {issue}")
+    
+    if results['suggestions']:
+        click.echo("\n💡 Suggestions:")
+        for suggestion in results['suggestions']:
+            click.echo(f"  • {suggestion}")
+    
+    # Suggest improved version
+    if results['score'] < 80:
+        improved = analyzer.suggest_improvement(password)
+        if improved != password:
+            click.echo(f"\n🔧 Example improvement: {improved}")
 
 
 if __name__ == '__main__':
