@@ -30,14 +30,18 @@ jobs:
       with:
         python-version: '3.10'
     
-    - name: Install ALL dependencies
+    - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install cryptography
         pip install click
         pip install tabulate
         pip install pyperclip
+        pip install requests
         pip install pyinstaller
+    
+    - name: Show installed packages
+      run: pip list
     
     - name: Create runner script
       shell: bash
@@ -50,14 +54,23 @@ jobs:
         # Add current directory to path
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         
-        # Import everything to ensure it's bundled
+        # Import all dependencies to ensure they're bundled
         import cryptography
         import cryptography.fernet
         import click
         import tabulate
         import pyperclip
+        import requests
+        import urllib
+        import urllib.request
+        import json
+        import base64
+        import hashlib
+        import re
+        import secrets
+        import string
         
-        # Import our modules
+        # Import our package
         import vaultkey
         from vaultkey.cli import cli
         
@@ -65,7 +78,7 @@ jobs:
             cli()
         EOFPY
     
-    - name: Build with PyInstaller (Simple)
+    - name: Build with PyInstaller
       shell: bash
       run: |
         pyinstaller --onefile \
@@ -73,16 +86,26 @@ jobs:
           --paths=. \
           --collect-all=cryptography \
           --collect-all=click \
+          --collect-all=requests \
+          --hidden-import=requests \
+          --hidden-import=urllib3 \
+          --hidden-import=certifi \
+          --hidden-import=charset_normalizer \
+          --hidden-import=idna \
           run_vaultkey.py
+    
+    - name: List dist contents
+      shell: bash
+      run: ls -la dist/
     
     - name: Test executable
       shell: bash
       run: |
         if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-          ./dist/${{ matrix.artifact_name }} --version || echo "Version check failed, continuing..."
+          ./dist/${{ matrix.artifact_name }} --version || echo "Version test failed"
         else
           chmod +x ./dist/${{ matrix.artifact_name }}
-          ./dist/${{ matrix.artifact_name }} --version || echo "Version check failed, continuing..."
+          ./dist/${{ matrix.artifact_name }} --version || echo "Version test failed"
         fi
     
     - name: Upload artifacts
@@ -109,15 +132,16 @@ jobs:
         cp VaultKey-macOS/VaultKey VaultKey/Mac/
         chmod +x VaultKey/Mac/VaultKey
         
-        # Create launchers
-        cat > VaultKey/Windows/START-VAULTKEY.bat << 'EOF'
+        # Create Windows launcher
+        cat > VaultKey/Windows/VaultKey.bat << 'EOF'
         @echo off
         title VaultKey Password Manager
         cls
-        echo  ========================================
-        echo      VaultKey Password Manager
-        echo  ========================================
+        echo ========================================
+        echo     VaultKey Password Manager
+        echo ========================================
         echo.
+        cd /d "%~dp0"
         VaultKey.exe interactive
         if errorlevel 1 (
             echo.
@@ -126,7 +150,8 @@ jobs:
         )
         EOF
         
-        cat > VaultKey/Mac/START-VAULTKEY.command << 'EOF'
+        # Create Mac launcher
+        cat > VaultKey/Mac/VaultKey.command << 'EOF'
         #!/bin/bash
         clear
         echo "========================================"
@@ -136,33 +161,36 @@ jobs:
         cd "$(dirname "$0")"
         ./VaultKey interactive
         EOF
-        chmod +x VaultKey/Mac/START-VAULTKEY.command
+        chmod +x VaultKey/Mac/VaultKey.command
         
-        # Create simple instructions
-        cat > VaultKey/README-FIRST.txt << 'EOF'
-        VAULTKEY PASSWORD MANAGER
+        # Create README
+        cat > VaultKey/README.txt << 'EOF'
+        VaultKey Password Manager
         =========================
         
-        TO START:
+        QUICK START:
         
-        WINDOWS → Double-click "START-VAULTKEY.bat"
-        MAC → Double-click "START-VAULTKEY.command"
+        WINDOWS:
+        1. Open Windows folder
+        2. Double-click VaultKey.bat
         
-        If Mac shows security warning:
-        - Right-click the file
-        - Choose "Open"
-        - Click "Open" again
+        MAC:
+        1. Open Mac folder
+        2. Double-click VaultKey.command
+        3. If security warning appears:
+           - Right-click VaultKey.command
+           - Select "Open"
+           - Click "Open" in dialog
         
         FIRST TIME:
-        1. Create a master password
-        2. REMEMBER IT! (write it down)
-        3. Start saving passwords
+        1. Create a master password (REMEMBER IT!)
+        2. Press 2 to add passwords
+        3. Press 4 to copy passwords quickly
         
-        DAILY USE:
-        - Add password: Press 2
-        - Find password: Press 1
-        - Copy password: Press 4
-        - Exit: Press 0
+        NEED HELP?
+        - Press 0 to exit
+        - Your passwords are encrypted and safe
+        - Master password cannot be recovered if forgotten
         EOF
         
         # Create packages
