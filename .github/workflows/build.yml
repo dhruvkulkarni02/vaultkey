@@ -23,10 +23,10 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.10'
     
@@ -54,7 +54,7 @@ jobs:
         pyinstaller --onefile --name=${{ matrix.artifact_name }} --paths=. run_vaultkey.py
     
     - name: Upload artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.asset_name }}
         path: dist/${{ matrix.artifact_name }}
@@ -66,13 +66,13 @@ jobs:
     
     steps:
     - name: Download Windows artifact
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: VaultKey-Windows
         path: windows
     
     - name: Download macOS artifact
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: VaultKey-macOS
         path: macos
@@ -87,7 +87,7 @@ jobs:
         cp macos/VaultKey VaultKey-Package/Mac/
         chmod +x VaultKey-Package/Mac/VaultKey
         
-        # Create launchers
+        # Create Windows launcher
         cat > VaultKey-Package/Windows/VaultKey.bat << 'EOFBAT'
         @echo off
         title VaultKey Password Manager
@@ -96,6 +96,7 @@ jobs:
         if errorlevel 1 pause
         EOFBAT
         
+        # Create Mac launcher
         cat > VaultKey-Package/Mac/VaultKey.command << 'EOFSH'
         #!/bin/bash
         cd "$(dirname "$0")"
@@ -126,7 +127,8 @@ jobs:
         zip -r VaultKey-Package.zip VaultKey-Package/
     
     - name: Upload Release Package
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: VaultKey-Complete-Package
         path: VaultKey-Package.zip
+        retention-days: 90
