@@ -1,0 +1,132 @@
+name: Build VaultKey Executables
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # Allows manual trigger
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+        include:
+          - os: windows-latest
+            artifact_name: VaultKey.exe
+            asset_name: VaultKey-Windows
+          - os: macos-latest
+            artifact_name: VaultKey
+            asset_name: VaultKey-macOS
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pyinstaller
+    
+    - name: Create runner script
+      shell: bash
+      run: |
+        cat > run_vaultkey.py << 'EOFPY'
+        #!/usr/bin/env python3
+        import sys
+        import os
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from vaultkey.cli import cli
+        if __name__ == '__main__':
+            cli()
+        EOFPY
+    
+    - name: Build with PyInstaller
+      run: |
+        pyinstaller --onefile --name=${{ matrix.artifact_name }} --paths=. run_vaultkey.py
+    
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: ${{ matrix.asset_name }}
+        path: dist/${{ matrix.artifact_name }}
+
+  create-release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Download Windows artifact
+      uses: actions/download-artifact@v3
+      with:
+        name: VaultKey-Windows
+        path: windows
+    
+    - name: Download macOS artifact
+      uses: actions/download-artifact@v3
+      with:
+        name: VaultKey-macOS
+        path: macos
+    
+    - name: Create Release Package
+      run: |
+        # Create distribution folders
+        mkdir -p VaultKey-Package/{Windows,Mac,Documentation}
+        
+        # Copy executables
+        cp windows/VaultKey.exe VaultKey-Package/Windows/
+        cp macos/VaultKey VaultKey-Package/Mac/
+        chmod +x VaultKey-Package/Mac/VaultKey
+        
+        # Create launchers
+        cat > VaultKey-Package/Windows/VaultKey.bat << 'EOFBAT'
+        @echo off
+        title VaultKey Password Manager
+        cd /d "%~dp0"
+        VaultKey.exe interactive
+        if errorlevel 1 pause
+        EOFBAT
+        
+        cat > VaultKey-Package/Mac/VaultKey.command << 'EOFSH'
+        #!/bin/bash
+        cd "$(dirname "$0")"
+        ./VaultKey interactive
+        EOFSH
+        chmod +x VaultKey-Package/Mac/VaultKey.command
+        
+        # Create README
+        cat > VaultKey-Package/README.txt << 'EOFREAD'
+        VaultKey Password Manager
+        =========================
+        
+        FOR WINDOWS:
+        1. Open Windows folder
+        2. Double-click VaultKey.bat
+        
+        FOR MAC:
+        1. Open Mac folder
+        2. Double-click VaultKey.command
+        3. If asked for permission, click "Open"
+        
+        FIRST TIME:
+        - Create a master password (REMEMBER IT!)
+        - Start adding passwords
+        EOFREAD
+        
+        # Create ZIP
+        zip -r VaultKey-Package.zip VaultKey-Package/
+    
+    - name: Upload Release Package
+      uses: actions/upload-artifact@v3
+      with:
+        name: VaultKey-Complete-Package
+        path: VaultKey-Package.zip
