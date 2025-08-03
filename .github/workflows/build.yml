@@ -5,7 +5,7 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
-  workflow_dispatch:  # Allows manual trigger
+  workflow_dispatch:
 
 jobs:
   build:
@@ -44,14 +44,59 @@ jobs:
         import sys
         import os
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        
+        # Explicitly import all dependencies to help PyInstaller
+        import cryptography
+        import cryptography.fernet
+        import cryptography.hazmat
+        import cryptography.hazmat.primitives
+        import cryptography.hazmat.primitives.kdf.pbkdf2
+        import cryptography.hazmat.backends
+        import click
+        import tabulate
+        
         from vaultkey.cli import cli
+        
         if __name__ == '__main__':
             cli()
         EOFPY
     
     - name: Build with PyInstaller
       run: |
-        pyinstaller --onefile --name=${{ matrix.artifact_name }} --paths=. run_vaultkey.py
+        pyinstaller --onefile \
+          --name=${{ matrix.artifact_name }} \
+          --paths=. \
+          --hidden-import=cryptography \
+          --hidden-import=cryptography.fernet \
+          --hidden-import=cryptography.hazmat.backends.openssl \
+          --hidden-import=cryptography.hazmat.primitives.kdf.pbkdf2 \
+          --hidden-import=cryptography.hazmat.primitives.hashes \
+          --hidden-import=cryptography.hazmat.primitives.ciphers \
+          --hidden-import=click \
+          --hidden-import=tabulate \
+          --hidden-import=vaultkey \
+          --hidden-import=vaultkey.cli \
+          --hidden-import=vaultkey.manager \
+          --hidden-import=vaultkey.crypto \
+          --hidden-import=vaultkey.storage \
+          --hidden-import=vaultkey.generator \
+          --hidden-import=vaultkey.strength \
+          --hidden-import=vaultkey.breach \
+          --hidden-import=vaultkey.portability \
+          --collect-all=cryptography \
+          --collect-all=click \
+          --copy-metadata=cryptography \
+          run_vaultkey.py
+    
+    - name: Test executable
+      shell: bash
+      run: |
+        if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+          ./dist/${{ matrix.artifact_name }} --version
+        else
+          chmod +x ./dist/${{ matrix.artifact_name }}
+          ./dist/${{ matrix.artifact_name }} --version
+        fi
     
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
@@ -91,44 +136,133 @@ jobs:
         cat > VaultKey-Package/Windows/VaultKey.bat << 'EOFBAT'
         @echo off
         title VaultKey Password Manager
+        echo Starting VaultKey Password Manager...
         cd /d "%~dp0"
         VaultKey.exe interactive
-        if errorlevel 1 pause
+        if errorlevel 1 (
+            echo.
+            echo Press any key to close...
+            pause > nul
+        )
         EOFBAT
         
-        # Create Mac launcher
+        # Create Mac launcher  
         cat > VaultKey-Package/Mac/VaultKey.command << 'EOFSH'
         #!/bin/bash
+        clear
+        echo "Starting VaultKey Password Manager..."
         cd "$(dirname "$0")"
         ./VaultKey interactive
         EOFSH
         chmod +x VaultKey-Package/Mac/VaultKey.command
         
-        # Create README
+        # Create comprehensive README
         cat > VaultKey-Package/README.txt << 'EOFREAD'
         VaultKey Password Manager
         =========================
         
+        QUICK START:
+        
         FOR WINDOWS:
-        1. Open Windows folder
-        2. Double-click VaultKey.bat
+        1. Open the "Windows" folder
+        2. Double-click "VaultKey.bat"
         
         FOR MAC:
-        1. Open Mac folder
-        2. Double-click VaultKey.command
-        3. If asked for permission, click "Open"
+        1. Open the "Mac" folder
+        2. Double-click "VaultKey.command"
+        3. If Mac shows security warning:
+           - Right-click VaultKey.command
+           - Select "Open"
+           - Click "Open" in the dialog
         
-        FIRST TIME:
-        - Create a master password (REMEMBER IT!)
-        - Start adding passwords
+        FIRST TIME SETUP:
+        1. You will see the VaultKey logo
+        2. Create a master password when prompted
+           - Make it something memorable
+           - WRITE IT DOWN - it cannot be recovered!
+        3. Start adding your passwords
+        
+        HOW TO USE:
+        - Press 2 to add a new password
+        - Press 4 to quickly copy a password
+        - Press 1 to search for passwords
+        - Press 0 to exit
+        
+        NEED HELP?
+        If VaultKey won't start, see Troubleshooting.txt
         EOFREAD
         
+        # Create troubleshooting guide
+        cat > VaultKey-Package/Documentation/Troubleshooting.txt << 'EOFTROUBLE'
+        TROUBLESHOOTING GUIDE
+        ====================
+        
+        WINDOWS ISSUES:
+        
+        "Windows protected your PC" message:
+        1. Click "More info"
+        2. Click "Run anyway"
+        
+        Won't start / closes immediately:
+        1. Right-click VaultKey.bat
+        2. Select "Run as administrator"
+        3. Check if antivirus is blocking it
+        
+        MAC ISSUES:
+        
+        "Cannot be opened because it is from an unidentified developer":
+        1. Right-click (or Control-click) VaultKey.command
+        2. Select "Open" from the menu
+        3. Click "Open" in the dialog
+        
+        OR:
+        1. Go to System Preferences → Security & Privacy
+        2. Click "Open Anyway" next to the VaultKey message
+        
+        "Permission denied" error:
+        1. Open Terminal (in Applications/Utilities)
+        2. Type: chmod +x (with space after)
+        3. Drag VaultKey.command into Terminal window
+        4. Press Enter
+        5. Try running again
+        
+        BOTH PLATFORMS:
+        
+        Forgot master password:
+        - Unfortunately, it cannot be recovered
+        - You'll need to delete the .vaultkey folder and start over
+        - This security feature protects your passwords
+        EOFTROUBLE
+        
         # Create ZIP
-        zip -r VaultKey-Package.zip VaultKey-Package/
+        cd VaultKey-Package
+        zip -r ../VaultKey-Complete.zip .
+        cd ..
+        
+        # Also create individual platform ZIPs
+        cd VaultKey-Package/Windows
+        zip -r ../../VaultKey-Windows.zip .
+        cd ../Mac  
+        zip -r ../../VaultKey-Mac.zip .
+        cd ../..
     
-    - name: Upload Release Package
+    - name: Upload Complete Package
       uses: actions/upload-artifact@v4
       with:
         name: VaultKey-Complete-Package
-        path: VaultKey-Package.zip
+        path: VaultKey-Complete.zip
+        retention-days: 90
+    
+    - name: Upload Windows Package
+      uses: actions/upload-artifact@v4
+      with:
+        name: VaultKey-Windows-Package
+        path: VaultKey-Windows.zip
+        retention-days: 90
+        
+    - name: Upload Mac Package
+      uses: actions/upload-artifact@v4
+      with:
+        name: VaultKey-Mac-Package
+        path: VaultKey-Mac.zip
         retention-days: 90
