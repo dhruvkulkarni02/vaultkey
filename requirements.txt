@@ -1,1 +1,5 @@
+cryptography
+click
 tabulate
+pyperclip
+requests
