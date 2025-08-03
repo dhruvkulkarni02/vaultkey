@@ -1,16 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_all
 
 datas = []
-datas += collect_data_files('vaultkey')
+binaries = []
+hiddenimports = ['requests']
+tmp_ret = collect_all('cryptography')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('requests')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
     ['run_vaultkey.py'],
-    pathex=['.'],
-    binaries=[],
+    pathex=[],
+    binaries=binaries,
     datas=datas,
-    hiddenimports=['vaultkey.manager', 'vaultkey.generator', 'vaultkey.strength', 'vaultkey.breach', 'vaultkey.portability', 'vaultkey.crypto', 'vaultkey.storage'],
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
