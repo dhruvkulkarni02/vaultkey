@@ -18,35 +18,57 @@ class Storage:
         """
         self.filename = filename
     
-    def save(self, encrypted_data: bytes) -> None:
+    def save(self, encrypted_data: bytes, version: int = 2) -> None:
         """
-        Save encrypted data to file with secure permissions.
+        Save encrypted data to file with secure permissions and version header.
         
         Args:
             encrypted_data: The encrypted bytes to save
+            version: Version number for future compatibility
         """
-        # Write the encrypted data to file
+        # Add version header for future compatibility
+        version_header = f"VAULTKEY_V{version}:".encode()
+        data_to_save = version_header + encrypted_data
+        
+        # Write the data to file
         with open(self.filename, 'wb') as f:
-            f.write(encrypted_data)
+            f.write(data_to_save)
         
         # Set restrictive file permissions (Unix/Linux/Mac only)
         # This makes the file readable/writable by owner only (600)
         if os.name == 'posix':  # Unix-like systems
             os.chmod(self.filename, 0o600)
     
-    def load(self) -> bytes:
+    def load(self) -> tuple:
         """
-        Load encrypted data from file.
+        Load encrypted data from file and return version info.
         
         Returns:
-            The encrypted bytes from file, or empty bytes if file doesn't exist
+            Tuple of (version, encrypted_data) where version is int and data is bytes
+            Returns (1, data) for legacy files without version headers
         """
         if not os.path.exists(self.filename):
-            # Return empty bytes if no password file exists yet
-            return b''
+            # Return empty data with current version for new vaults
+            return (2, b'')
         
         with open(self.filename, 'rb') as f:
-            return f.read()
+            data = f.read()
+        
+        # Check for version header
+        if data.startswith(b'VAULTKEY_V'):
+            try:
+                # Parse version from header like "VAULTKEY_V2:"
+                header_end = data.find(b':')
+                if header_end > 0:
+                    version_str = data[10:header_end].decode()
+                    version = int(version_str)
+                    encrypted_data = data[header_end + 1:]
+                    return (version, encrypted_data)
+            except (ValueError, UnicodeDecodeError):
+                pass
+        
+        # Legacy format without version header
+        return (1, data)
     
     def exists(self) -> bool:
         """

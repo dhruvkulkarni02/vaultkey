@@ -1,0 +1,14 @@
+include README.md
+include LICENSE
+include SECURITY_ENHANCEMENTS.md
+include requirements.txt
+include pyproject.toml
+recursive-include vaultkey *.py
+prune vaultkey/__pycache__
+global-exclude *.pyc
+global-exclude __pycache__/*
+global-exclude build/*
+global-exclude dist/*
+global-exclude .git/*
+global-exclude venv/*
+global-exclude *.egg-info/*

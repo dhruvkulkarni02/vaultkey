@@ -3,3 +3,4 @@ click
 tabulate
 pyperclip
 requests
+argon2-cffi

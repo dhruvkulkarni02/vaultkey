@@ -3,6 +3,9 @@ manager.py - Main password manager class that orchestrates all functionality
 """
 import json
 import os
+import hmac
+import hashlib
+import time
 from typing import Dict, Optional, List
 from datetime import datetime
 
@@ -25,6 +28,13 @@ class PasswordManager:
         self.storage = Storage(storage_file)
         self.unlocked = False
         self._cached_passwords = {}
+        self.master_password_hash = None  # For integrity checking
+        
+        # Account lockout protection
+        self.failed_attempts = 0
+        self.lockout_until = None
+        self.max_attempts = 5
+        self.lockout_duration = 300  # 5 minutes
     
     def create_vault(self, master_password: str) -> None:
         """
@@ -42,6 +52,9 @@ class PasswordManager:
         # Create encryption key from master password
         self.crypto.create_key(master_password)
         
+        # Store master password hash for integrity checking
+        self.master_password_hash = hashlib.sha256(master_password.encode()).digest()
+        
         # Create empty vault with metadata
         vault_data = {
             "version": "1.1",  # Updated version for history support
@@ -53,9 +66,9 @@ class PasswordManager:
             }
         }
         
-        # Encrypt and save
-        encrypted_data = self.crypto.encrypt(json.dumps(vault_data))
-        self.storage.save(encrypted_data)
+        # Cache the data and save with integrity
+        self._cached_passwords = vault_data
+        self._save()  # Use enhanced save with integrity
         
         self.unlocked = True
         self._cached_passwords = vault_data
@@ -63,37 +76,80 @@ class PasswordManager:
     
     def unlock(self, master_password: str) -> bool:
         """
-        Unlock an existing vault with the master password.
+        Unlock the vault using the master password.
         
         Args:
             master_password: The master password to unlock the vault
             
         Returns:
-            True if successfully unlocked, False if wrong password
+            True if unlocked successfully, False if wrong password
         """
+        # Check if locked out
+        if self.lockout_until and time.time() < self.lockout_until:
+            remaining = int(self.lockout_until - time.time())
+            raise Exception(f"Account locked due to too many failed attempts. Try again in {remaining} seconds.")
+        
         if not self.storage.exists():
-            raise Exception("No vault found! Use create_vault() first.")
+            raise Exception("No vault exists! Create one with create_vault() first.")
         
         try:
-            # Set up decryption key
+            # Load encrypted data with version and integrity check
+            version, data = self.storage.load()
+            
+            if version == 1:
+                # Legacy format - no integrity check or special handling
+                encrypted_data = data
+                print("⚠️  Warning: Vault using legacy format (v1). Consider re-saving to enable enhanced security.")
+            elif version >= 2:
+                # Check if data has integrity signature (new format)
+                if len(data) > 32 and data[:8] == b'VAULTKEY':
+                    # New format with integrity check
+                    integrity_check = data[8:40]  # 32-byte HMAC
+                    encrypted_data = data[40:]
+                    
+                    # Verify integrity
+                    master_hash = hashlib.sha256(master_password.encode()).digest()
+                    expected_hmac = hmac.new(master_hash, encrypted_data, hashlib.sha256).digest()
+                    if not hmac.compare_digest(integrity_check, expected_hmac):
+                        self.failed_attempts += 1
+                        if self.failed_attempts >= self.max_attempts:
+                            self.lockout_until = time.time() + self.lockout_duration
+                            raise Exception(f"Vault integrity check failed! Account locked for {self.lockout_duration} seconds.")
+                        raise Exception("Vault integrity check failed - possible tampering detected!")
+                else:
+                    # Version 2+ but no integrity signature yet
+                    encrypted_data = data
+                    print("⚠️  Warning: Upgrading vault security features...")
+            else:
+                raise Exception(f"Unsupported vault version: {version}")
+            
+            # Create key and decrypt
             self.crypto.create_key(master_password)
-            
-            # Try to decrypt the vault
-            encrypted_data = self.storage.load()
             decrypted_data = self.crypto.decrypt(encrypted_data)
-            
-            # Parse the JSON data
             self._cached_passwords = json.loads(decrypted_data)
             
-            # Migrate old vaults to support history
-            if self._cached_passwords.get("version", "1.0") == "1.0":
+            # Store master password hash for integrity checking
+            self.master_password_hash = hashlib.sha256(master_password.encode()).digest()
+            
+            # Check if we need to migrate to newer version
+            if self._cached_passwords.get("version") == "1.0":
                 self._migrate_vault_to_v1_1()
             
             self.unlocked = True
+            self.failed_attempts = 0  # Reset on success
             return True
             
         except Exception as e:
+            # Handle authentication failures
+            if "integrity" in str(e).lower() or "locked" in str(e).lower():
+                raise  # Re-raise integrity/lockout errors as-is
+            
             # Wrong password or corrupted data
+            self.failed_attempts += 1
+            if self.failed_attempts >= self.max_attempts:
+                self.lockout_until = time.time() + self.lockout_duration
+                raise Exception(f"Too many failed attempts. Account locked for {self.lockout_duration} seconds.")
+            
             self.unlocked = False
             self._cached_passwords = {}
             return False
@@ -475,11 +531,105 @@ class PasswordManager:
         return export_data
     
     def _save(self) -> None:
-        """Save the current password data to encrypted storage"""
+        """Save the current password data to encrypted storage with integrity check"""
         json_data = json.dumps(self._cached_passwords, indent=2)
         encrypted_data = self.crypto.encrypt(json_data)
-        self.storage.save(encrypted_data)
+        
+        # Add integrity check if we have master password hash
+        if self.master_password_hash:
+            # Create HMAC for integrity verification
+            integrity_check = hmac.new(self.master_password_hash, encrypted_data, hashlib.sha256).digest()
+            
+            # Save with integrity header: VAULTKEY + 32-byte HMAC + encrypted data
+            data_with_integrity = b'VAULTKEY' + integrity_check + encrypted_data
+            self.storage.save(data_with_integrity)
+        else:
+            # Fallback to legacy format
+            self.storage.save(encrypted_data)
     
+    def create_secure_backup(self, backup_password: str = None, backup_path: str = None) -> str:
+        """
+        Create encrypted backup with different password and versioning.
+        
+        Args:
+            backup_password: Password for backup (default: use master password)
+            backup_path: Path for backup file (default: auto-generate)
+            
+        Returns:
+            Path to created backup file
+        """
+        if not self.unlocked:
+            raise Exception("Vault is locked! Call unlock() first.")
+        
+        # Generate backup filename if not provided
+        if not backup_path:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            backup_path = f"vaultkey_backup_{timestamp}.vkbak"
+        
+        # Create backup data with metadata
+        backup_data = {
+            "version": "1.2",
+            "backup_date": datetime.now().isoformat(),
+            "original_vault": self.storage.filename,
+            "backup_type": "secure_backup",
+            "data": self._cached_passwords
+        }
+        
+        # Create new crypto instance for backup
+        backup_crypto = Crypto()
+        backup_crypto.salt_file = backup_path + ".salt"
+        backup_crypto.create_key(backup_password or self.master_password_hash.hex())
+        
+        # Encrypt backup data
+        json_data = json.dumps(backup_data, indent=2)
+        encrypted = backup_crypto.encrypt(json_data)
+        
+        # Save backup with version header
+        backup_storage = Storage(backup_path)
+        backup_storage.save(encrypted, version=2)
+        
+        return backup_path
+    
+    def restore_from_backup(self, backup_path: str, backup_password: str) -> bool:
+        """
+        Restore vault from secure backup.
+        
+        Args:
+            backup_path: Path to backup file
+            backup_password: Password for backup
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Load backup
+            backup_storage = Storage(backup_path)
+            version, encrypted_data = backup_storage.load()
+            
+            # Create crypto instance for backup
+            backup_crypto = Crypto()
+            backup_crypto.salt_file = backup_path + ".salt"
+            backup_crypto.create_key(backup_password)
+            
+            # Decrypt backup
+            decrypted_data = backup_crypto.decrypt(encrypted_data)
+            backup_data = json.loads(decrypted_data)
+            
+            # Validate backup format
+            if backup_data.get("backup_type") != "secure_backup":
+                raise Exception("Invalid backup format")
+            
+            # Restore data
+            self._cached_passwords = backup_data["data"]
+            self._save()
+            
+            print(f"✅ Restored from backup created on {backup_data.get('backup_date', 'unknown date')}")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Failed to restore backup: {e}")
+            return False
+
     def change_master_password(self, current_password: str, new_password: str) -> bool:
         """
         Change the master password for the vault.
@@ -498,6 +648,9 @@ class PasswordManager:
         # Create new salt and encryption key
         if os.path.exists(self.crypto.salt_file):
             os.remove(self.crypto.salt_file)
+        
+        # Update master password hash for integrity checking
+        self.master_password_hash = hashlib.sha256(new_password.encode()).digest()
         
         # Re-encrypt with new password
         self.crypto.create_key(new_password)

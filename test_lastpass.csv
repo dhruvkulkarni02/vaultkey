@@ -1,5 +1,0 @@
-url,username,password,totp,extra,name,grouping,fav
-https://test.com,user@test.com,pass123,,,Test Site,Test,0
-https://example.com,test user,pass456,,,Example
-Site,Test,0
-,special@char.com,pass789,,,Site with "quotes",Test,0

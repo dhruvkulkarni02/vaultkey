@@ -1,16 +1,50 @@
+# VaultKey 🔐
+
+[![PyPI version](https://badge.fury.io/py/vaultkey-cli.svg)](https://badge.fury.io/py/vaultkey-cli)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+
+**Military-grade password manager with Argon2id encryption and zero-knowledge architecture**
+
+VaultKey is a secure, offline password manager that keeps your passwords encrypted locally and never sends them to any server. Your master password is never stored anywhere, ensuring complete zero-knowledge security.
+
+## 🚀 Features
+
+- **🔒 Military-Grade Security**: Argon2id memory-hard key derivation with 64MB memory cost
+- **🛡️ Zero-Knowledge Architecture**: Your passwords never leave your device
+- **✅ Integrity Protection**: HMAC-SHA256 verification prevents tampering
+- **🚫 Account Lockout Protection**: Automatic lockout after failed attempts
+- **📋 Secure Clipboard**: Auto-clearing clipboard with original content restoration
+- **🔄 Vault Versioning**: Backward compatibility with version management
+- **💾 Secure Backups**: Independent encryption keys for backup files
+- **🔍 Breach Detection**: Check passwords against known data breaches
+- **📊 Security Auditing**: Comprehensive password strength analysis
+- **🎯 Interactive Mode**: Professional CLI interface with color coding
+- **📁 Import/Export**: Support for LastPass, 1Password, and other formats
+
+## 📦 Installation
+
+### From PyPI (Recommended)
+```bash
+pip install vaultkey-cli
+```
+
+### From Source
+```bash
+git clone https://github.com/dhruvkulkarni02/vaultkey.git
+cd vaultkey
+pip install -r requirements.txt
+```
+
 ## Quick Start
 
 ### Installation
 ```bash
-# Clone the repository
-git clone https://github.com/dhruvkulkarni02/vaultkey.git
-cd vaultkey
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Initialize your vault
+# Initialize your vault (first time only)
 vk init
+
+# Or using the full command
+vaultkey init
 ```
 
 ## Usage Examples

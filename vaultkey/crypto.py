@@ -7,6 +7,7 @@ import base64
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+import argon2
 
 
 class Crypto:
@@ -20,8 +21,8 @@ class Crypto:
         """
         Derive an encryption key from the master password.
         
-        This uses PBKDF2 (Password-Based Key Derivation Function) to:
-        1. Slow down brute force attacks with 100,000 iterations
+        This uses Argon2id (upgraded from PBKDF2) to:
+        1. Provide memory-hard key derivation resistant to GPU/ASIC attacks
         2. Use a salt to prevent rainbow table attacks
         3. Generate a 256-bit key suitable for Fernet
         """
@@ -31,22 +32,38 @@ class Crypto:
             with open(self.salt_file, 'rb') as f:
                 salt = f.read()
         else:
-            # Generate a new random 16-byte salt
-            salt = os.urandom(16)
+            # Generate a new random 32-byte salt (increased from 16)
+            salt = os.urandom(32)
             with open(self.salt_file, 'wb') as f:
                 f.write(salt)
         
-        # Step 2: Configure key derivation
-        # PBKDF2 with SHA256, 100k iterations (NIST recommended minimum)
-        kdf = PBKDF2HMAC(
-            algorithm=hashes.SHA256(),
-            length=32,  # 32 bytes = 256 bits
-            salt=salt,
-            iterations=100000,  # More iterations = slower but more secure
-        )
-        
-        # Step 3: Derive key from password
-        key = base64.urlsafe_b64encode(kdf.derive(master_password.encode()))
+        # Step 2: Use Argon2id for key derivation (memory-hard function)
+        try:
+            # Use Argon2id with high memory cost for better security
+            hasher = argon2.PasswordHasher(
+                time_cost=3,      # 3 iterations
+                memory_cost=65536,  # 64MB memory
+                parallelism=4,    # 4 parallel threads
+                hash_len=32,      # 32 bytes output
+                salt_len=32       # 32 bytes salt
+            )
+            
+            # Generate key using Argon2id
+            key_hash = hasher.hash(master_password, salt=salt)
+            # Extract just the hash part (remove the parameters)
+            key_bytes = key_hash.split('$')[-1].encode()
+            key = base64.urlsafe_b64encode(base64.b64decode(key_bytes + b'=='))
+            
+        except Exception:
+            # Fallback to PBKDF2 for compatibility if Argon2 fails
+            print("⚠️  Warning: Falling back to PBKDF2 (install argon2-cffi for better security)")
+            kdf = PBKDF2HMAC(
+                algorithm=hashes.SHA256(),
+                length=32,  # 32 bytes = 256 bits
+                salt=salt,
+                iterations=100000,  # More iterations = slower but more secure
+            )
+            key = base64.urlsafe_b64encode(kdf.derive(master_password.encode()))
         
         # Step 4: Create Fernet instance with the key
         self.key = Fernet(key)

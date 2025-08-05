@@ -6,6 +6,7 @@ import click
 import getpass
 import sys
 import os
+import hashlib
 from typing import Optional
 from tabulate import tabulate
 from datetime import datetime
@@ -48,8 +49,43 @@ def prompt_master_password(confirm: bool = False) -> Optional[str]:
     return password
 
 
+def secure_clipboard_copy(password: str, timeout: int = 30):
+    """Securely copy password to clipboard with auto-clear and restoration"""
+    try:
+        import pyperclip
+        
+        # Save current clipboard content
+        try:
+            original_clipboard = pyperclip.paste()
+        except:
+            original_clipboard = ""
+        
+        # Copy password to clipboard
+        pyperclip.copy(password)
+        
+        def clear_and_restore():
+            time.sleep(timeout)
+            try:
+                # Only clear if it's still our password
+                current = pyperclip.paste()
+                if current == password:
+                    # Restore original content or clear
+                    pyperclip.copy(original_clipboard if original_clipboard else "")
+            except:
+                pass
+        
+        if timeout > 0:
+            thread = threading.Thread(target=clear_and_restore, daemon=True)
+            thread.start()
+            return True
+        return True
+        
+    except ImportError:
+        return False
+
+
 def clear_clipboard_after_delay(seconds):
-    """Clear clipboard after specified seconds"""
+    """Clear clipboard after specified seconds (legacy function)"""
     def clear():
         time.sleep(seconds)
         try:
@@ -63,11 +99,12 @@ def clear_clipboard_after_delay(seconds):
 
 
 @click.group()
-@click.version_option(version="0.1.0", prog_name="VaultKey")
+@click.version_option(version="1.0.0", prog_name="VaultKey")
 def cli():
     """VaultKey - A secure password manager
     
-    Store your passwords locally with strong encryption.
+    Military-grade password manager with Argon2id encryption and zero-knowledge architecture.
+    Your passwords are encrypted locally and never leave your device.
     Your master password is never stored anywhere.
     """
     pass
@@ -207,12 +244,9 @@ def get(site, show, copy):
         
         # Copy to clipboard if requested
         if copy:
-            try:
-                import pyperclip
-                pyperclip.copy(creds['password'])
-                click.echo("\n✅ Password copied to clipboard!")
-                clear_clipboard_after_delay(30)
-            except ImportError:
+            if secure_clipboard_copy(creds['password'], 30):
+                click.echo("\n✅ Password copied to clipboard! (Auto-clear in 30 seconds)")
+            else:
                 click.echo("\n⚠️  Install 'pyperclip' to enable clipboard support", err=True)
                 
     except Exception as e:
@@ -596,16 +630,11 @@ def cp(site, timeout):
                 return
         
         # Copy to clipboard
-        try:
-            import pyperclip
-            pyperclip.copy(creds['password'])
+        if secure_clipboard_copy(creds['password'], timeout):
             click.echo(f"✅ Password for {click.style(site, bold=True)} copied to clipboard")
-            
-            # Auto-clear clipboard after timeout
             if timeout > 0:
-                click.echo(f"⏱️  Clipboard will be cleared in {timeout} seconds...")
-                clear_clipboard_after_delay(timeout)
-        except ImportError:
+                click.echo(f"⏱️  Clipboard will auto-clear in {timeout} seconds...")
+        else:
             click.echo("⚠️  Install 'pyperclip' to enable clipboard support", err=True)
             click.echo("   Run: pip install pyperclip")
             
@@ -1228,6 +1257,111 @@ def breaches(site, verbose):
         sys.exit(1)
     finally:
         pm.lock()
+
+
+@cli.command()
+@click.option('--password', '-p', help='Backup password (default: use master password)')
+@click.option('--output', '-o', help='Backup file path (default: auto-generate)')
+def backup(password, output):
+    """Create secure encrypted backup of your vault"""
+    pm = get_password_manager()
+    
+    # Unlock vault
+    master_password = prompt_master_password()
+    if not master_password or not pm.unlock(master_password):
+        click.echo("❌ Invalid master password!", err=True)
+        sys.exit(1)
+    
+    try:
+        # Use provided backup password or prompt for one
+        backup_password = password
+        if not backup_password:
+            click.echo("\n🔐 Backup Security:")
+            click.echo("   You can use the same master password or a different one for the backup.")
+            
+            use_same = click.confirm("   Use the same master password for backup?", default=True)
+            if use_same:
+                backup_password = master_password
+            else:
+                backup_password = prompt_master_password(confirm=True)
+                if not backup_password:
+                    click.echo("❌ Backup cancelled!", err=True)
+                    return
+        
+        # Create backup
+        backup_path = pm.create_secure_backup(backup_password, output)
+        
+        click.echo(f"\n✅ Secure backup created: {backup_path}")
+        click.echo("   This backup is encrypted and portable.")
+        click.echo("   Store it in a safe location separate from your main vault.")
+        
+    except Exception as e:
+        click.echo(f"❌ Backup failed: {e}", err=True)
+        sys.exit(1)
+    finally:
+        pm.lock()
+
+
+@cli.command()
+@click.argument('backup_file')
+@click.option('--password', '-p', help='Backup password')
+def restore(backup_file, password):
+    """Restore vault from secure backup"""
+    pm = get_password_manager()
+    
+    if not os.path.exists(backup_file):
+        click.echo(f"❌ Backup file not found: {backup_file}", err=True)
+        sys.exit(1)
+    
+    # Warn about overwriting current vault
+    if pm.storage.exists():
+        click.echo("⚠️  Warning: This will overwrite your current vault!")
+        if not click.confirm("   Continue with restore?"):
+            click.echo("Restore cancelled.")
+            return
+    
+    # Get backup password
+    backup_password = password
+    if not backup_password:
+        backup_password = prompt_master_password()
+        if not backup_password:
+            click.echo("❌ Restore cancelled!", err=True)
+            return
+    
+    # Unlock current vault (if exists) to get master password for re-encryption
+    master_password = None
+    if pm.storage.exists():
+        master_password = prompt_master_password()
+        if not master_password or not pm.unlock(master_password):
+            click.echo("❌ Invalid master password!", err=True)
+            sys.exit(1)
+    else:
+        # New vault - get master password for the restored vault
+        click.echo("\n🔐 Master Password for Restored Vault:")
+        master_password = prompt_master_password(confirm=True)
+        if not master_password:
+            click.echo("❌ Restore cancelled!", err=True)
+            return
+    
+    try:
+        # Restore from backup
+        if pm.restore_from_backup(backup_file, backup_password):
+            # Re-encrypt with current master password
+            pm.master_password_hash = hashlib.sha256(master_password.encode()).digest()
+            pm.crypto.create_key(master_password)
+            pm._save()
+            
+            click.echo("\n✅ Vault successfully restored from backup!")
+        else:
+            click.echo("❌ Failed to restore from backup!", err=True)
+            sys.exit(1)
+        
+    except Exception as e:
+        click.echo(f"❌ Restore failed: {e}", err=True)
+        sys.exit(1)
+    finally:
+        if pm.unlocked:
+            pm.lock()
 
 
 @cli.command()

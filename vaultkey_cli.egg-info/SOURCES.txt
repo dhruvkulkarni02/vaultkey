@@ -1,6 +1,14 @@
+.gitattributes
+.gitignore
 LICENSE
+MANIFEST.in
 README.md
-setup.py
+SECURITY_ENHANCEMENTS.md
+pyproject.toml
+requirements.txt
+.github/workflows/build.yml
+build-scripts/build-mac-installer.sh
+build-scripts/build-windows-installer.bat
 vaultkey/__init__.py
 vaultkey/breach.py
 vaultkey/cli.py
@@ -10,9 +18,3 @@ vaultkey/manager.py
 vaultkey/portability.py
 vaultkey/storage.py
 vaultkey/strength.py
-vaultkey_cli.egg-info/PKG-INFO
-vaultkey_cli.egg-info/SOURCES.txt
-vaultkey_cli.egg-info/dependency_links.txt
-vaultkey_cli.egg-info/entry_points.txt
-vaultkey_cli.egg-info/requires.txt
-vaultkey_cli.egg-info/top_level.txt
