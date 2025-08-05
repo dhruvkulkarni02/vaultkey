@@ -157,42 +157,18 @@ class VaultImporter:
                 password = row.get('password', '')
                 notes = row.get('extra', '')
                 
-                # Convert None to empty string
-                site = site or ''
-                username = username or ''
-                password = password or ''
-                notes = notes or ''
-                
-                # Skip empty entries
-                if not site or not username:
-                    continue
-                
-                # Sanitize site name to remove problematic characters
-                site = site.strip()
-                
-                # Clean up the site name
-                if site.startswith('http'):
-                    # Extract domain from URL
-                    from urllib.parse import urlparse
-                    try:
+                if site and username:
+                    # Clean up the site name
+                    if site.startswith('http'):
+                        # Extract domain from URL
+                        from urllib.parse import urlparse
                         parsed = urlparse(site)
                         site = parsed.netloc or site
-                    except Exception:
-                        # If URL parsing fails, use the original
-                        pass
-                
-                # Remove any null bytes or other problematic characters
-                site = site.replace('\x00', '').replace('\r', '').replace('\n', ' ')
-                username = username.replace('\x00', '').replace('\r', '').replace('\n', ' ')
-                password = password.replace('\x00', '')
-                notes = notes.replace('\x00', '').replace('\r\n', '\n').replace('\r', '\n')
-                
-                # Ensure site name is valid
-                if site:
+                    
                     passwords[site] = {
-                        'username': username.strip(),
+                        'username': username,
                         'password': password,
-                        'notes': notes.strip(),
+                        'notes': notes,
                         'created': datetime.now().isoformat(),
                         'modified': datetime.now().isoformat()
                     }

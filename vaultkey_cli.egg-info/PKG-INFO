@@ -1,0 +1,328 @@
+Metadata-Version: 2.4
+Name: vaultkey-cli
+Version: 0.1.0
+Summary: A secure, locally-encrypted password manager with beautiful CLI
+Home-page: https://github.com/yourusername/vaultkey
+Author: Your Name
+Author-email: your.email@example.com
+Project-URL: Bug Reports, https://github.com/yourusername/vaultkey/issues
+Project-URL: Source, https://github.com/yourusername/vaultkey
+Project-URL: Documentation, https://github.com/yourusername/vaultkey#readme
+Keywords: password manager security encryption cli vault
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: End Users/Desktop
+Classifier: Topic :: Security
+Classifier: Topic :: Security :: Cryptography
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Operating System :: OS Independent
+Classifier: Environment :: Console
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: cryptography>=41.0.0
+Requires-Dist: click>=8.0.0
+Requires-Dist: tabulate>=0.9.0
+Requires-Dist: pyperclip>=1.8.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0.0; extra == "dev"
+Requires-Dist: pytest-cov; extra == "dev"
+Requires-Dist: black; extra == "dev"
+Requires-Dist: flake8; extra == "dev"
+Requires-Dist: build; extra == "dev"
+Requires-Dist: twine; extra == "dev"
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: keywords
+Dynamic: license-file
+Dynamic: project-url
+Dynamic: provides-extra
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
+
+## Usage Examples
+
+### Basic Usage
+```bash
+# Create a new vault
+vk init
+
+# Add passwords
+vk add -s github.com -u developer@email.com -g
+vk add -s gmail.com -u myemail@gmail.com
+
+# Retrieve passwords
+vk get -s github --show
+vk get -s gmail --copy  # Copy to clipboard
+
+# List and search
+vk list
+vk list -f git  # Filter by 'git'
+```
+
+### Security Features
+```bash
+# Check password strength
+vk check -p "MyP@ssw0rd123"
+
+# Audit all passwords
+vk audit -v
+
+# Check for breached passwords
+vk breaches
+vk breaches -s github.com  # Check specific site
+
+# Full security audit
+vk audit -b -v  # Audit with breach checking and verbose output
+```
+
+### Password Generation
+```bash
+# Generate passwords with different options
+vk generate -l 24                    # 24 characters
+vk generate --no-symbols             # No special characters
+vk generate --no-ambiguous           # Avoid confusing characters
+vk generate -c 5                     # Generate 5 passwords
+```# VaultKey 🔐
+
+A secure, locally-encrypted password manager built from scratch with a focus on security best practices and zero-knowledge architecture.
+
+## Features
+
+### Core Security
+- **Strong Encryption**: AES-256 encryption using the `cryptography` library
+- **Secure Key Derivation**: PBKDF2 with 100,000 iterations for master password
+- **Zero-Knowledge**: Your master password never leaves your device
+- **Local Storage**: All data stored locally in encrypted format
+- **Cross-Platform**: Works on Windows, macOS, and Linux
+
+### Password Management
+- **Password Generation**: Cryptographically secure random password generation
+- **Smart Search**: Find passwords with partial site name matching
+- **Password History**: Track creation and modification dates
+- **Secure Notes**: Add notes to your password entries
+
+### Security Analysis
+- **Password Strength Analyzer**: Real-time strength scoring and feedback
+- **Entropy Calculation**: Mathematical randomness measurement
+- **Pattern Detection**: Identifies common patterns and sequences
+- **Time-to-Crack Estimates**: Based on modern GPU capabilities
+
+### Breach Detection
+- **HaveIBeenPwned Integration**: Check if passwords appear in data breaches
+- **K-Anonymity Protocol**: Never sends your full password hash
+- **Severity Classification**: Categorizes risk levels (safe to critical)
+- **Batch Checking**: Efficiently scan all passwords at once
+
+## Security Overview
+
+VaultKey implements several security best practices:
+
+- Master passwords are never stored, only the derived encryption key
+- All passwords are encrypted using Fernet (AES-128 in CBC mode with HMAC)
+- Cryptographically secure random number generation for passwords
+- Salted key derivation to prevent rainbow table attacks
+- Secure memory handling to minimize sensitive data exposure
+- Password strength analysis with actionable feedback
+- Breach detection using k-anonymity to protect your passwords
+
+## Installation
+
+### Prerequisites
+- Python 3.8 or higher
+- pip package manager
+
+### Dependencies
+- `cryptography` - For encryption operations
+- `click` - For the command-line interface
+- `requests` - For breach detection API calls
+
+### Setup
+
+1. Clone the repository:
+```bash
+git clone https://github.com/yourusername/vaultkey.git
+cd vaultkey
+```
+
+2. Create a virtual environment (recommended):
+```bash
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+```
+
+3. Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+## Usage
+
+### Command Line Interface
+
+```bash
+# First time setup - create your master password
+python vaultkey.py init
+
+# Add a new password
+python vaultkey.py add --site github.com --username myusername
+
+# Retrieve a password
+python vaultkey.py get --site github.com
+
+# Generate a secure password
+python vaultkey.py generate --length 20
+
+# List all stored sites
+python vaultkey.py list
+
+# Update an existing password
+python vaultkey.py update --site github.com
+
+# Delete a password
+python vaultkey.py delete --site github.com
+
+# Check password strength
+python vaultkey.py check --password "test123"
+
+# Audit all passwords
+python vaultkey.py audit --verbose
+
+# Check for breached passwords
+python vaultkey.py breaches
+
+# Full security audit with breach checking
+python vaultkey.py audit --check-breaches
+```
+
+### Python API
+
+```python
+from vaultkey import PasswordManager
+
+# Initialize the password manager
+pm = PasswordManager()
+pm.unlock("your-master-password")
+
+# Add a password
+pm.add_password("github.com", "username", "password123")
+
+# Generate and store a secure password
+secure_pass = pm.generate_password(length=20)
+pm.add_password("example.com", "user@example.com", secure_pass)
+
+# Retrieve a password
+creds = pm.get_password("github.com")
+print(f"Username: {creds['username']}")
+print(f"Password: {creds['password']}")
+```
+
+## Project Structure
+
+```
+vaultkey/
+├── vaultkey/
+│   ├── __init__.py
+│   ├── crypto.py          # Encryption/decryption logic
+│   ├── storage.py         # Persistent storage handling
+│   ├── generator.py       # Password generation utilities
+│   ├── strength.py        # Password strength analysis
+│   ├── breach.py          # Breach detection with HIBP
+│   ├── manager.py         # Main password manager class
+│   └── cli.py             # Command-line interface
+├── tests/
+│   ├── test_crypto.py     # Encryption tests
+│   ├── test_storage.py    # Storage tests
+│   ├── test_generator.py  # Generator tests
+│   └── test_strength.py   # Strength analysis tests
+├── docs/
+│   ├── security.md        # Security documentation
+│   └── api.md             # API documentation
+├── requirements.txt
+├── requirements-dev.txt
+├── setup.py
+├── LICENSE
+└── README.md
+```
+
+## Development
+
+### Running Tests
+
+```bash
+# Install dev dependencies
+pip install -r requirements-dev.txt
+
+# Run all tests
+pytest
+
+# Run with coverage
+pytest --cov=vaultkey tests/
+
+# Run specific test file
+pytest tests/test_strength.py
+```
+
+### Contributing
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+### Security Considerations
+
+If you discover a security vulnerability, please email [your-email] instead of opening a public issue.
+
+## Roadmap
+
+### Completed ✅
+- [x] Core encryption functionality
+- [x] Command-line interface
+- [x] Password generation
+- [x] Password strength analysis
+- [x] Breach detection (HaveIBeenPwned)
+- [x] Security auditing
+
+### In Progress 🚧
+- [ ] Two-factor authentication for vault
+- [ ] Import from other password managers
+- [ ] Export functionality
+
+### Planned 📋
+- [ ] GUI application
+- [ ] Browser extension
+- [ ] Password history tracking
+- [ ] Secure password sharing
+- [ ] Cloud sync with end-to-end encryption
+- [ ] Biometric unlock (TouchID/FaceID)
+- [ ] Emergency access features
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Acknowledgments
+
+- Built using the [cryptography](https://cryptography.io/) library
+- Inspired by security best practices from OWASP
+- Password strength algorithms based on zxcvbn
+
+## Disclaimer
+
+This password manager is a personal project built for educational purposes. While it implements security best practices, it has not undergone professional security auditing. For production use, consider established password managers that have been thoroughly audited.
+
+---
+
+**Remember**: Use a strong master password and never share it with anyone!

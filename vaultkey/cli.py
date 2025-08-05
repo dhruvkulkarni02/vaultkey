@@ -643,6 +643,592 @@ def generate(length, count, no_symbols, no_digits, no_uppercase, no_ambiguous):
     
     click.echo("\n💡 Tip: Use 'vaultkey add -g' to generate and save a password")
 
+@cli.command('import-passwords')
+@click.argument('file')
+@click.option('--format', '-f', type=click.Choice(['csv', 'json', 'lastpass', 'bitwarden', '1password', 'chrome', 'keepass']), 
+              default='csv', help='Import format')
+def import_passwords(file, format):
+    """Import passwords from file
+    
+    Example:
+        vk import-passwords ~/Downloads/passwords.csv --format csv
+        vk import-passwords ~/Downloads/lastpass_export.csv --format lastpass
+    """
+    pm = get_password_manager()
+    
+    if not os.path.exists(file):
+        click.echo(f"❌ File not found: {file}", err=True)
+        return
+    
+    # Unlock vault
+    password = prompt_master_password()
+    if not password or not pm.unlock(password):
+        click.echo("❌ Invalid master password!", err=True)
+        sys.exit(1)
+    
+    try:
+        importer = VaultImporter()
+        
+        click.echo(f"Importing from {format} format...")
+        passwords = importer.import_file(file, format)
+        
+        imported_count = 0
+        skipped_count = 0
+        
+        for site, data in passwords.items():
+            try:
+                # Check if password already exists
+                existing = pm.get_password(site)
+                if existing:
+                    skipped_count += 1
+                    click.echo(f"  Skipping {site} (already exists)")
+                else:
+                    pm.add_password(
+                        site=site, 
+                        username=data.get('username', ''), 
+                        password=data.get('password', ''), 
+                        notes=data.get('notes', '')
+                    )
+                    imported_count += 1
+                    if imported_count % 10 == 0:
+                        click.echo(f"  Imported {imported_count} passwords...")
+            except Exception as e:
+                click.echo(f"  Error importing {site}: {e}")
+                skipped_count += 1
+        
+        click.echo(f"\n✅ Import complete!")
+        click.echo(f"   Imported: {imported_count} passwords")
+        if skipped_count > 0:
+            click.echo(f"   Skipped: {skipped_count} passwords")
+    
+    except Exception as e:
+        click.echo(f"❌ Import failed: {e}", err=True)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+    finally:
+        pm.lock()
+
+
+@cli.command('export-passwords')
+@click.option('--format', '-f', type=click.Choice(['csv', 'json']), default='csv', help='Export format')
+@click.option('--output', '-o', help='Output file path')
+@click.option('--include-passwords', is_flag=True, help='Include actual passwords (CAREFUL!)')
+def export_passwords(format, output, include_passwords):
+    """Export passwords to file
+    
+    Example:
+        vk export-passwords --format csv
+        vk export-passwords --format json --output backup.json --include-passwords
+    """
+    pm = get_password_manager()
+    
+    if not include_passwords:
+        click.echo("⚠️  WARNING: Exporting without passwords (use --include-passwords to include)")
+    
+    # Unlock vault
+    password = prompt_master_password()
+    if not password or not pm.unlock(password):
+        click.echo("❌ Invalid master password!", err=True)
+        sys.exit(1)
+    
+    try:
+        exporter = VaultExporter()
+        
+        # Get all passwords
+        sites = pm.list_sites()
+        if not sites:
+            click.echo("No passwords to export")
+            return
+            
+        export_data = {}
+        
+        for site in sites:
+            password_data = pm.get_password(site)
+            if include_passwords:
+                export_data[site] = password_data
+            else:
+                export_data[site] = {
+                    'username': password_data.get('username', ''),
+                    'notes': password_data.get('notes', ''),
+                    'password': '***HIDDEN***',
+                    'created': password_data.get('created', ''),
+                    'modified': password_data.get('modified', '')
+                }
+        
+        # Determine output filename
+        if output:
+            filename = output
+        else:
+            # Default filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"vaultkey_export_{timestamp}.{format}"
+        
+        # Export using the VaultExporter
+        exporter.export_passwords(export_data, format, filename)
+        
+        click.echo(f"✅ Exported {len(export_data)} passwords to {filename}")
+        
+        if not include_passwords:
+            click.echo("   (Passwords hidden - use --include-passwords to include them)")
+    
+    except Exception as e:
+        click.echo(f"❌ Export failed: {e}", err=True)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+    finally:
+        pm.lock()
+
+
+@cli.command()
+@click.option('--breaches', '-b', is_flag=True, help='Check passwords against known breaches')
+@click.option('--verbose', '-v', is_flag=True, help='Show detailed analysis for each password')
+@click.option('--weak-only', '-w', is_flag=True, help='Only show weak passwords (score < 60)')
+@click.option('--old-only', '-o', is_flag=True, help='Only show passwords older than 90 days')
+def audit(breaches, verbose, weak_only, old_only):
+    """Perform a comprehensive security audit of all passwords
+    
+    Examples:
+        vk audit                    # Basic strength audit
+        vk audit -v                 # Verbose output with details
+        vk audit -b                 # Include breach checking
+        vk audit -b -v              # Full audit with breach checking
+        vk audit -w                 # Only show weak passwords
+        vk audit -o                 # Only show old passwords
+    """
+    pm = get_password_manager()
+    analyzer = PasswordStrength()
+    
+    # Unlock vault
+    password = prompt_master_password()
+    if not password or not pm.unlock(password):
+        click.echo("❌ Invalid master password!", err=True)
+        sys.exit(1)
+    
+    try:
+        sites = pm.list_sites()
+        if not sites:
+            click.echo("No passwords to audit")
+            return
+        
+        click.echo(f"\n🔍 Auditing {len(sites)} password(s)...")
+        if breaches:
+            click.echo("   Including breach checking (this may take a moment)")
+        click.echo()
+        
+        # Initialize counters
+        stats = {
+            'total': len(sites),
+            'strong': 0,
+            'weak': 0,
+            'very_weak': 0,
+            'breached': 0,
+            'old': 0,
+            'duplicates': 0
+        }
+        
+        password_hashes = {}  # Track duplicate passwords
+        results = []
+        
+        # Initialize breach checker if needed
+        breach_checker = None
+        if breaches:
+            breach_checker = BreachChecker()
+        
+        # Analyze each password
+        for i, site in enumerate(sites, 1):
+            if not verbose:
+                click.echo(f"\rProgress: {i}/{len(sites)}", nl=False)
+            
+            data = pm.get_password(site)
+            password_text = data['password']
+            
+            # Analyze strength
+            analysis = analyzer.analyze(password_text)
+            score = analysis['score']
+            
+            # Check for duplicates
+            import hashlib
+            pwd_hash = hashlib.sha256(password_text.encode()).hexdigest()
+            if pwd_hash in password_hashes:
+                stats['duplicates'] += 1
+                is_duplicate = True
+                duplicate_site = password_hashes[pwd_hash]
+            else:
+                password_hashes[pwd_hash] = site
+                is_duplicate = False
+                duplicate_site = None
+            
+            # Calculate age
+            try:
+                modified = datetime.fromisoformat(data.get('modified', ''))
+                age_days = (datetime.now() - modified).days
+                is_old = age_days > 90
+                if is_old:
+                    stats['old'] += 1
+            except:
+                age_days = 0
+                is_old = False
+            
+            # Categorize by strength
+            if score >= 80:
+                stats['strong'] += 1
+                strength_category = 'Strong'
+                strength_emoji = '🟢'
+            elif score >= 60:
+                stats['strong'] += 1
+                strength_category = 'Good'
+                strength_emoji = '🟡'
+            elif score >= 40:
+                stats['weak'] += 1
+                strength_category = 'Weak'
+                strength_emoji = '🟠'
+            else:
+                stats['very_weak'] += 1
+                strength_category = 'Very Weak'
+                strength_emoji = '🔴'
+            
+            # Check breaches if requested
+            breach_info = None
+            is_breached = False
+            if breach_checker:
+                breach_result = breach_checker.check_password(password_text)
+                is_breached = breach_result['count'] > 0
+                if is_breached:
+                    stats['breached'] += 1
+                    breach_info = breach_result
+            
+            # Apply filters
+            if weak_only and score >= 60:
+                continue
+            if old_only and not is_old:
+                continue
+            
+            # Store result for display
+            result = {
+                'site': site,
+                'username': data.get('username', ''),
+                'score': score,
+                'category': strength_category,
+                'emoji': strength_emoji,
+                'age_days': age_days,
+                'is_old': is_old,
+                'is_duplicate': is_duplicate,
+                'duplicate_site': duplicate_site,
+                'is_breached': is_breached,
+                'breach_info': breach_info,
+                'analysis': analysis,
+                'notes': data.get('notes', '')
+            }
+            results.append(result)
+        
+        if not verbose:
+            click.echo()  # New line after progress
+        
+        # Display results
+        if verbose and results:
+            click.echo("\n📊 Detailed Results:")
+            click.echo("=" * 60)
+            
+            for result in results:
+                click.echo(f"\n{result['emoji']} {click.style(result['site'], bold=True)}")
+                click.echo(f"   Username: {result['username']}")
+                click.echo(f"   Strength: {result['score']}/100 ({result['category']})")
+                
+                if result['age_days'] > 0:
+                    if result['age_days'] == 1:
+                        age_str = "1 day old"
+                    elif result['age_days'] < 30:
+                        age_str = f"{result['age_days']} days old"
+                    elif result['age_days'] < 365:
+                        age_str = f"{result['age_days'] // 30} months old"
+                    else:
+                        age_str = f"{result['age_days'] // 365} years old"
+                    click.echo(f"   Age: {age_str}")
+                    
+                    if result['is_old']:
+                        click.echo(f"   ⚠️  Password is old (>90 days)")
+                
+                if result['is_duplicate']:
+                    click.echo(f"   ⚠️  Duplicate password (same as {result['duplicate_site']})")
+                
+                if result['is_breached']:
+                    count = result['breach_info']['count']
+                    click.echo(f"   🚨 BREACHED: Found in {count:,} breaches!")
+                
+                if result['notes']:
+                    click.echo(f"   Notes: {result['notes'][:50]}...")
+                
+                # Show improvement suggestions for weak passwords
+                if result['score'] < 60:
+                    feedback = result['analysis']['feedback']
+                    click.echo(f"   💡 Suggestion: {feedback}")
+        
+        elif results:
+            # Table view for non-verbose
+            headers = ['Site', 'Username', 'Strength', 'Age', 'Issues']
+            table_data = []
+            
+            for result in results:
+                # Age display
+                if result['age_days'] == 0:
+                    age_str = "Today"
+                elif result['age_days'] == 1:
+                    age_str = "1 day"
+                elif result['age_days'] < 30:
+                    age_str = f"{result['age_days']}d"
+                elif result['age_days'] < 365:
+                    age_str = f"{result['age_days'] // 30}mo"
+                else:
+                    age_str = f"{result['age_days'] // 365}yr"
+                
+                # Issues column
+                issues = []
+                if result['is_old']:
+                    issues.append("Old")
+                if result['is_duplicate']:
+                    issues.append("Duplicate")
+                if result['is_breached']:
+                    issues.append("BREACHED")
+                if result['score'] < 40:
+                    issues.append("Very Weak")
+                elif result['score'] < 60:
+                    issues.append("Weak")
+                
+                issues_str = ", ".join(issues) if issues else "None"
+                
+                # Strength display with emoji
+                strength_display = f"{result['emoji']} {result['score']}"
+                
+                table_data.append([
+                    result['site'][:20],
+                    result['username'][:15],
+                    strength_display,
+                    age_str,
+                    issues_str[:20]
+                ])
+            
+            click.echo(tabulate(table_data, headers=headers, tablefmt='simple_grid'))
+        
+        # Summary statistics
+        click.echo(f"\n📈 Audit Summary:")
+        click.echo("=" * 30)
+        click.echo(f"Total passwords: {stats['total']}")
+        click.echo(f"Strong/Good passwords: {stats['strong']} ({stats['strong']/stats['total']*100:.1f}%)")
+        click.echo(f"Weak passwords: {stats['weak']} ({stats['weak']/stats['total']*100:.1f}%)")
+        click.echo(f"Very weak passwords: {stats['very_weak']} ({stats['very_weak']/stats['total']*100:.1f}%)")
+        
+        if stats['old'] > 0:
+            click.echo(f"Old passwords (>90 days): {stats['old']} ({stats['old']/stats['total']*100:.1f}%)")
+        
+        if stats['duplicates'] > 0:
+            click.echo(f"Duplicate passwords: {stats['duplicates']} ({stats['duplicates']/stats['total']*100:.1f}%)")
+        
+        if breaches and stats['breached'] > 0:
+            click.echo(f"🚨 Breached passwords: {stats['breached']} ({stats['breached']/stats['total']*100:.1f}%)")
+        
+        # Recommendations
+        click.echo(f"\n💡 Recommendations:")
+        recommendations = []
+        
+        if stats['very_weak'] > 0:
+            recommendations.append(f"• Update {stats['very_weak']} very weak password(s)")
+        if stats['weak'] > 0:
+            recommendations.append(f"• Consider updating {stats['weak']} weak password(s)")
+        if stats['old'] > 0:
+            recommendations.append(f"• Update {stats['old']} old password(s)")
+        if stats['duplicates'] > 0:
+            recommendations.append(f"• Change {stats['duplicates']} duplicate password(s)")
+        if breaches and stats['breached'] > 0:
+            recommendations.append(f"• URGENT: Change {stats['breached']} breached password(s)")
+        
+        if recommendations:
+            for rec in recommendations:
+                click.echo(rec)
+        else:
+            click.echo("• Your passwords look good! 🎉")
+        
+        # Overall security score
+        security_score = (stats['strong'] / stats['total']) * 100
+        if stats['breached'] > 0:
+            security_score -= 30  # Heavy penalty for breached passwords
+        if stats['duplicates'] > 0:
+            security_score -= 10  # Penalty for duplicates
+        
+        security_score = max(0, security_score)  # Don't go below 0
+        
+        click.echo(f"\n🎯 Overall Security Score: {security_score:.1f}/100")
+        
+        if security_score >= 90:
+            click.echo("   Excellent security! 🏆")
+        elif security_score >= 75:
+            click.echo("   Good security 👍")
+        elif security_score >= 50:
+            click.echo("   Fair security - room for improvement")
+        else:
+            click.echo("   Poor security - immediate action needed! ⚠️")
+        
+    except Exception as e:
+        click.echo(f"❌ Audit failed: {e}", err=True)
+        sys.exit(1)
+    finally:
+        pm.lock()
+
+
+@cli.command()
+@click.option('--site', '-s', help='Check specific site only')
+@click.option('--verbose', '-v', is_flag=True, help='Show detailed breach information')
+def breaches(site, verbose):
+    """Check passwords against known data breaches using HaveIBeenPwned
+    
+    Examples:
+        vk breaches                    # Check all passwords
+        vk breaches -s github.com      # Check specific site
+        vk breaches -v                 # Verbose output with details
+    """
+    pm = get_password_manager()
+    
+    # Unlock vault
+    password = prompt_master_password()
+    if not password or not pm.unlock(password):
+        click.echo("❌ Invalid master password!", err=True)
+        sys.exit(1)
+    
+    try:
+        breach_checker = BreachChecker()
+        
+        # Get sites to check
+        if site:
+            # Check specific site
+            if not pm.get_password(site):
+                # Try fuzzy search
+                matches = pm.search_sites(site)
+                if not matches:
+                    click.echo(f"❌ No password found for '{site}'", err=True)
+                    return
+                
+                if len(matches) == 1:
+                    site = matches[0]
+                    click.echo(f"Found: {site}")
+                else:
+                    click.echo(f"Multiple matches for '{site}':")
+                    for i, match in enumerate(matches[:5], 1):
+                        click.echo(f"  {i}. {match}")
+                    click.echo("\nPlease use the exact site name")
+                    return
+            
+            sites = [site]
+        else:
+            sites = pm.list_sites()
+        
+        if not sites:
+            click.echo("No passwords to check")
+            return
+        
+        click.echo(f"\n🔍 Checking {len(sites)} password(s) against breach database...")
+        click.echo("   Using HaveIBeenPwned API (k-anonymity protocol)")
+        click.echo("   Your passwords are never sent to the service\n")
+        
+        breached_passwords = []
+        clean_passwords = []
+        
+        # Check each password
+        for i, site_name in enumerate(sites, 1):
+            if len(sites) > 1:
+                click.echo(f"\rProgress: {i}/{len(sites)}", nl=False)
+            
+            data = pm.get_password(site_name)
+            password_text = data['password']
+            
+            # Check against breaches
+            result = breach_checker.check_password(password_text)
+            
+            if result['count'] > 0:
+                breached_passwords.append({
+                    'site': site_name,
+                    'username': data.get('username', ''),
+                    'count': result['count'],
+                    'severity': result['severity'],
+                    'recommendation': result['recommendation']
+                })
+            else:
+                clean_passwords.append({
+                    'site': site_name,
+                    'username': data.get('username', '')
+                })
+        
+        if len(sites) > 1:
+            click.echo()  # New line after progress
+        
+        # Display results
+        if breached_passwords:
+            click.echo(f"\n🚨 Found {len(breached_passwords)} breached password(s):")
+            click.echo("=" * 50)
+            
+            for breach in breached_passwords:
+                click.echo(f"\n🔴 {click.style(breach['site'], bold=True, fg='red')}")
+                click.echo(f"   Username: {breach['username']}")
+                click.echo(f"   Found in: {breach['count']:,} breaches")
+                click.echo(f"   Severity: {breach['severity']}")
+                
+                if verbose:
+                    click.echo(f"   Recommendation: {breach['recommendation']}")
+                
+                # Priority based on breach count
+                if breach['count'] > 10000:
+                    click.echo(f"   🚨 CRITICAL: Change immediately!")
+                elif breach['count'] > 1000:
+                    click.echo(f"   ⚠️  HIGH: Change as soon as possible")
+                else:
+                    click.echo(f"   ⚠️  MEDIUM: Consider changing")
+        
+        if clean_passwords:
+            if verbose or not breached_passwords:
+                click.echo(f"\n✅ {len(clean_passwords)} password(s) not found in breaches:")
+                for clean in clean_passwords:
+                    click.echo(f"   🟢 {clean['site']} ({clean['username']})")
+        
+        # Summary and recommendations
+        total_checked = len(sites)
+        breach_percentage = (len(breached_passwords) / total_checked) * 100
+        
+        click.echo(f"\n📊 Breach Check Summary:")
+        click.echo("=" * 30)
+        click.echo(f"Passwords checked: {total_checked}")
+        click.echo(f"Breached: {len(breached_passwords)} ({breach_percentage:.1f}%)")
+        click.echo(f"Clean: {len(clean_passwords)} ({100-breach_percentage:.1f}%)")
+        
+        if breached_passwords:
+            click.echo(f"\n💡 Next Steps:")
+            click.echo("1. Change all breached passwords immediately")
+            click.echo("2. Enable 2FA where possible")
+            click.echo("3. Use unique passwords for each site")
+            click.echo("4. Consider using generated passwords: vk add -g")
+            
+            # Sort by severity for priority
+            critical = [b for b in breached_passwords if b['count'] > 10000]
+            high = [b for b in breached_passwords if 1000 < b['count'] <= 10000]
+            medium = [b for b in breached_passwords if b['count'] <= 1000]
+            
+            if critical:
+                click.echo(f"\n🚨 CRITICAL (change first): {', '.join([b['site'] for b in critical])}")
+            if high:
+                click.echo(f"⚠️  HIGH priority: {', '.join([b['site'] for b in high])}")
+            if medium:
+                click.echo(f"⚠️  MEDIUM priority: {', '.join([b['site'] for b in medium])}")
+        else:
+            click.echo(f"\n🎉 Great! None of your passwords were found in known breaches.")
+            click.echo(f"   Keep up the good security practices!")
+        
+    except Exception as e:
+        click.echo(f"❌ Breach check failed: {e}", err=True)
+        if "requests" in str(e).lower():
+            click.echo("   Make sure you have an internet connection")
+        sys.exit(1)
+    finally:
+        pm.lock()
+
 
 @cli.command()
 def interactive():
