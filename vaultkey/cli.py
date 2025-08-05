@@ -367,8 +367,13 @@ def list(filter, verbose, sort, weak_only):
             headers.extend(['Created', 'Notes'])
         
         for row in table_data:
+            # Truncate long URLs for better table formatting
+            site = row['site']
+            if len(site) > 50:
+                site = site[:47] + "..."
+            
             display_row = [
-                row['site'],
+                site,
                 row['username'],
                 str(row['password_length']),
                 row['modified']

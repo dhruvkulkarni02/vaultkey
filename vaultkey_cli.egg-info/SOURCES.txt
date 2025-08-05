@@ -1,14 +1,10 @@
-.gitattributes
-.gitignore
 LICENSE
 MANIFEST.in
 README.md
 SECURITY_ENHANCEMENTS.md
 pyproject.toml
 requirements.txt
-.github/workflows/build.yml
-build-scripts/build-mac-installer.sh
-build-scripts/build-windows-installer.bat
+setup.py
 vaultkey/__init__.py
 vaultkey/breach.py
 vaultkey/cli.py

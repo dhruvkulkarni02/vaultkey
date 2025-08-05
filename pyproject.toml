@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=45", "wheel", "setuptools_scm"]
+requires = ["setuptools>=45", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -88,10 +88,10 @@ Changelog = "https://github.com/dhruvkulkarni02/vaultkey/releases"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["vaultkey*"]
-exclude = ["tests*", "build*", "dist*"]
+exclude = ["tests*"]
 
 [tool.setuptools.package-data]
-vaultkey = ["*.py"]
+vaultkey = ["*.py", "py.typed"]
 
 [tool.black]
 line-length = 88
