@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: vaultkey-cli
-Version: 1.0.0
+Version: 1.0.1
 Summary: Military-grade password manager with Argon2id encryption and zero-knowledge architecture
 Author-email: Dhruv Kulkarni <kulkarnidhruv02@gmail.com>
 Maintainer-email: Dhruv Kulkarni <kulkarnidhruv02@gmail.com>
