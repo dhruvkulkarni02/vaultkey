@@ -107,7 +107,10 @@ class VaultImporter:
             
             # Skip header if present
             first_row = next(reader, None)
-            if first_row and 'password' in first_row[0].lower():
+            header_keywords = ['site', 'username', 'password', 'url', 'title', 'name', 'login']
+            is_header = first_row and any(keyword in col.lower() for col in first_row for keyword in header_keywords)
+            
+            if is_header:
                 # It's a header, skip it
                 pass
             else:
