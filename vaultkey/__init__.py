@@ -10,14 +10,14 @@ Features:
 - Breach detection monitoring
 """
 
-from .manager import PasswordManager
-from .generator import generate_password
-from .cli import cli
-
 __version__ = "1.0.1"
 __author__ = "Dhruv Kulkarni"
 __email__ = "kulkarnidhruv02@gmail.com"
 __license__ = "MIT"
+
+from .manager import PasswordManager
+from .generator import generate_password
+from .cli import cli
 
 __all__ = ["PasswordManager", "generate_password", "cli"]
 

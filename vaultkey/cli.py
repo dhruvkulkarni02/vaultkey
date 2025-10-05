@@ -13,6 +13,7 @@ from datetime import datetime
 import threading
 import time
 
+from . import __version__
 from .manager import PasswordManager
 from .generator import generate_password
 from .strength import PasswordStrength, format_strength_bar
@@ -99,7 +100,7 @@ def clear_clipboard_after_delay(seconds):
 
 
 @click.group()
-@click.version_option(version="1.0.0", prog_name="VaultKey")
+@click.version_option(version=__version__, prog_name="VaultKey")
 def cli():
     """VaultKey - A secure password manager
     
