@@ -24,6 +24,12 @@ VaultKey is a secure, offline password manager that keeps your passwords encrypt
 
 ## 📦 Installation
 
+### Homebrew (macOS)
+```bash
+brew tap dhruvkulkarni02/vaultkey    # One-time setup
+brew install vaultkey
+```
+
 ### From PyPI (Recommended)
 ```bash
 pip install vaultkey-cli
