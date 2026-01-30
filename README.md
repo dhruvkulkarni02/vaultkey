@@ -22,12 +22,18 @@ VaultKey is a secure, offline password manager that keeps your passwords encrypt
 - **🎯 Interactive Mode**: Professional CLI interface with color coding
 - **📁 Import/Export**: Support for LastPass, 1Password, and other formats
 
-## 📦 Installation
+## 📸 Screenshots
 
-### Homebrew (macOS)
-```bash
-brew install vaultkey
-```
+### Interactive Mode
+![Interactive Mode](assets/screenshots/interactive-mode.png)
+
+### Password List
+![Password List](assets/screenshots/password-list.png)
+
+### Security Audit
+![Security Audit](assets/screenshots/security-audit.png)
+
+## 📦 Installation
 
 ### From PyPI
 ```bash

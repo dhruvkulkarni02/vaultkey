@@ -1,3 +1,0 @@
-[console_scripts]
-vaultkey = vaultkey.cli:cli
-vk = vaultkey.cli:cli

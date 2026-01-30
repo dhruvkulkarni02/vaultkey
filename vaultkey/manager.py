@@ -30,6 +30,10 @@ class PasswordManager:
         self._cached_passwords = {}
         self.master_password_hash = None  # For integrity checking
         
+        # Set salt file path to be in the same directory as the vault
+        vault_dir = os.path.dirname(os.path.abspath(storage_file))
+        self.crypto.salt_file = os.path.join(vault_dir, "salt.bin")
+        
         # Account lockout protection
         self.failed_attempts = 0
         self.lockout_until = None
