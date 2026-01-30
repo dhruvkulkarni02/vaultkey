@@ -112,10 +112,11 @@ class PasswordManager:
                     expected_hmac = hmac.new(master_hash, encrypted_data, hashlib.sha256).digest()
                     if not hmac.compare_digest(integrity_check, expected_hmac):
                         self.failed_attempts += 1
+                        remaining = self.max_attempts - self.failed_attempts
                         if self.failed_attempts >= self.max_attempts:
                             self.lockout_until = time.time() + self.lockout_duration
-                            raise Exception(f"Vault integrity check failed! Account locked for {self.lockout_duration} seconds.")
-                        raise Exception("Vault integrity check failed - possible tampering detected!")
+                            raise Exception(f"Too many failed attempts! Account locked for {self.lockout_duration // 60} minutes.")
+                        raise Exception(f"Incorrect master password. {remaining} attempt(s) remaining before lockout.")
                 else:
                     # Version 2+ but no integrity signature yet
                     encrypted_data = data

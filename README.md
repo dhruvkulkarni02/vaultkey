@@ -41,24 +41,23 @@ cd vaultkey
 pip install -r requirements.txt
 ```
 
-## Quick Start
+## 🚀 Quick Start
 
-### Installation
 ```bash
 # Initialize your vault (first time only)
 vk init
 
-# Or using the full command
-vaultkey init
+# Add your first password (generates a secure password)
+vk add -s github.com -u developer@email.com -g
+
+# Copy password to clipboard
+vk cp github
 ```
 
-## Usage Examples
+## 📖 Usage Examples
 
 ### Basic Password Management
 ```bash
-# Create a new vault (first time only)
-vk init
-
 # Add passwords
 vk add -s github.com -u developer@email.com -g    # Generate password
 vk add -s gmail.com -u myemail@gmail.com          # Enter manually
@@ -115,149 +114,49 @@ vk interactive                                    # Launch interactive UI
 
 # Delete passwords
 vk delete github.com                              # Delete with confirmation
-vk delete github.com -f                          # Force delete
+vk delete github.com -f                           # Force delete
 ```
 
-# VaultKey 🔐
+## 🔒 Security Overview
 
-A secure, locally-encrypted password manager built from scratch with a focus on security best practices and zero-knowledge architecture.
+VaultKey implements industry-leading security practices:
 
-## Features
+- **Zero-Knowledge Architecture**: Master passwords are never stored
+- **Argon2id Key Derivation**: Memory-hard function with 64MB memory cost
+- **AES-256 Encryption**: Military-grade encryption for all data
+- **HMAC-SHA256 Integrity**: Tamper detection for vault files
+- **K-Anonymity**: Breach checking without exposing passwords
+- **Secure Memory Handling**: Minimizes sensitive data exposure
+- **Account Lockout**: Protection against brute-force attacks
 
-### Core Security
-- **Strong Encryption**: AES-256 encryption using the `cryptography` library
-- **Secure Key Derivation**: PBKDF2 with 100,000 iterations for master password
-- **Zero-Knowledge**: Your master password never leaves your device
-- **Local Storage**: All data stored locally in encrypted format
-- **Cross-Platform**: Works on Windows, macOS, and Linux
-
-### Password Management
-- **Password Generation**: Cryptographically secure random password generation
-- **Smart Search**: Find passwords with partial site name matching
-- **Password History**: Track creation and modification dates
-- **Secure Notes**: Add notes to your password entries
-
-### Security Analysis
-- **Password Strength Analyzer**: Real-time strength scoring and feedback
-- **Entropy Calculation**: Mathematical randomness measurement
-- **Pattern Detection**: Identifies common patterns and sequences
-- **Time-to-Crack Estimates**: Based on modern GPU capabilities
-
-### Breach Detection
-- **HaveIBeenPwned Integration**: Check if passwords appear in data breaches
-- **K-Anonymity Protocol**: Never sends your full password hash
-- **Severity Classification**: Categorizes risk levels (safe to critical)
-- **Batch Checking**: Efficiently scan all passwords at once
-- **Real-time Monitoring**: Check new passwords against known breaches
-
-### Import/Export Support
-- **Multiple Formats**: CSV, JSON, LastPass, Bitwarden, 1Password
-- **Secure Export**: Option to exclude passwords for safe backups
-- **Bulk Import**: Import hundreds of passwords efficiently
-- **Format Detection**: Auto-detect common password manager exports
-
-## Security Overview
-
-VaultKey implements several security best practices:
-
-- Master passwords are never stored, only the derived encryption key
-- All passwords are encrypted using Fernet (AES-128 in CBC mode with HMAC)
-- Cryptographically secure random number generation for passwords
-- Salted key derivation to prevent rainbow table attacks
-- Secure memory handling to minimize sensitive data exposure
-- Password strength analysis with actionable feedback
-- Breach detection using k-anonymity to protect your passwords
-
-## Installation
-
-### Prerequisites
-- Python 3.8 or higher
-- pip package manager
-
-### Dependencies
-- `cryptography` - For encryption operations
-- `click` - For the command-line interface
-- `requests` - For breach detection API calls
-- `tabulate` - For formatted table output
-- `pyperclip` - For clipboard operations
-- `flask` - For optional web GUI
-
-### Setup
-
-1. Clone the repository:
-```bash
-git clone https://github.com/dhruvkulkarni02/vaultkey.git
-cd vaultkey
-```
-
-2. Create a virtual environment (recommended):
-```bash
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
-
-3. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
-
-4. Initialize your vault:
-```bash
-vk init
-```
-
-## Usage
-
-## Command Reference
+## 📚 Command Reference
 
 ### Core Commands
-- `vk init` - Initialize a new password vault
-- `vk add` - Add a new password entry
-- `vk get` - Retrieve password by site name
-- `vk list` - Display all stored passwords
-- `vk search` - Search passwords by site/username/notes
-- `vk cp` - Quick copy password to clipboard
-- `vk delete` - Remove a password entry
+| Command | Description |
+|---------|-------------|
+| `vk init` | Initialize a new password vault |
+| `vk add` | Add a new password entry |
+| `vk get` | Retrieve password by site name |
+| `vk list` | Display all stored passwords |
+| `vk search` | Search passwords by site/username/notes |
+| `vk cp` | Quick copy password to clipboard |
+| `vk delete` | Remove a password entry |
 
 ### Security Commands
-- `vk audit` - Comprehensive security audit
-- `vk breaches` - Check passwords against breach database
-- `vk generate` - Generate secure passwords
+| Command | Description |
+|---------|-------------|
+| `vk audit` | Comprehensive security audit |
+| `vk breaches` | Check passwords against breach database |
+| `vk generate` | Generate secure passwords |
 
 ### Data Management
-- `vk import-passwords` - Import from other password managers
-- `vk export-passwords` - Export passwords to file
-- `vk interactive` - Launch interactive mode
+| Command | Description |
+|---------|-------------|
+| `vk import-passwords` | Import from other password managers |
+| `vk export-passwords` | Export passwords to file |
+| `vk interactive` | Launch interactive mode |
 
-### Command Line Interface
-
-```bash
-# Vault Management
-vk init                                           # Create new vault
-vk interactive                                    # Interactive mode
-
-# Password Operations
-vk add --site github.com --username user          # Add password
-vk get --site github.com --show                   # Show password
-vk cp github                                       # Copy to clipboard
-vk delete github.com                              # Delete password
-
-# Search and List
-vk list --verbose                                  # Detailed list
-vk search "github"                                 # Search passwords
-vk list --weak-only                                # Show weak passwords
-
-# Security Analysis
-vk audit --breaches --verbose                     # Full security audit
-vk breaches --verbose                             # Check all breaches
-vk generate --length 24                           # Generate password
-
-# Import/Export
-vk import-passwords data.csv --format csv
-vk export-passwords --format json
-```
-
-### Python API
+## 🐍 Python API
 
 ```python
 from vaultkey import PasswordManager
@@ -279,7 +178,7 @@ print(f"Username: {creds['username']}")
 print(f"Password: {creds['password']}")
 ```
 
-## Project Structure
+## 📁 Project Structure
 
 ```
 vaultkey/
@@ -293,43 +192,22 @@ vaultkey/
 │   ├── portability.py     # Import/export functionality
 │   ├── manager.py         # Main password manager class
 │   └── cli.py             # Command-line interface
-├── tests/
-├── docs/
 ├── requirements.txt
 ├── setup.py
-├── run_vaultkey.py        # Main entry point
-├── LICENSE
+├── pyproject.toml
 └── README.md
 ```
 
-## Development
+## 🛠️ Development
 
 ### Running Tests
 
 ```bash
-# Install dev dependencies (if available)
-pip install pytest pytest-cov
-
 # Run basic functionality test
 python -c "from vaultkey.cli import cli; print('✅ VaultKey imports successfully')"
 
 # Test password generation
 python -c "from vaultkey.generator import generate_password; print('Generated:', generate_password(16))"
-
-# Test strength analysis
-python -c "from vaultkey.strength import PasswordStrength; ps = PasswordStrength(); print('Strength test:', ps.analyze('Test123!'))"
-```
-
-### Building Executables
-
-```bash
-# Install PyInstaller
-pip install pyinstaller
-
-# Build executable
-pyinstaller VaultKey.spec
-
-# The executable will be in dist/VaultKey/
 ```
 
 ### Contributing
@@ -340,63 +218,42 @@ pyinstaller VaultKey.spec
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
-### Security Considerations
+### Security Vulnerabilities
 
-If you discover a security vulnerability, please email [your-email] instead of opening a public issue.
+If you discover a security vulnerability, please open a private security advisory instead of a public issue.
 
-## Roadmap
+## 🗺️ Roadmap
 
 ### Completed ✅
-- [x] Core encryption functionality (AES-256)
+- [x] Argon2id encryption with 64MB memory cost
 - [x] Command-line interface with 10+ commands
 - [x] Password generation with customizable options
 - [x] Password strength analysis and scoring
 - [x] Breach detection (HaveIBeenPwned integration)
-- [x] Comprehensive security auditing
 - [x] Import/export functionality (CSV, JSON, LastPass, etc.)
 - [x] Interactive mode with professional UI
-- [x] Quick copy to clipboard functionality
-- [x] Advanced search with filters
-- [x] Password aging and duplicate detection
-
-### In Progress 🚧
-- [ ] Web-based GUI interface
-- [ ] Mobile app considerations
-- [ ] Enhanced documentation
+- [x] HMAC-SHA256 integrity verification
 
 ### Planned 📋
-- [ ] Desktop GUI application (tkinter/PyQt)
+- [ ] Desktop GUI application
 - [ ] Browser extension
-- [ ] Password history tracking
 - [ ] Secure password sharing
 - [ ] Cloud sync with end-to-end encryption
 - [ ] Biometric unlock (TouchID/FaceID)
-- [ ] Emergency access features
-- [ ] Two-factor authentication for vault
 
-## License
+## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## Acknowledgments
+## 🙏 Acknowledgments
 
-- Built using the [cryptography](https://cryptography.io/) library for strong encryption
-- Breach detection powered by [HaveIBeenPwned](https://haveibeenpwned.com/) API
-- Password strength algorithms inspired by security best practices
-- CLI interface built with [Click](https://click.palletsprojects.com/)
-- Table formatting by [tabulate](https://pypi.org/project/tabulate/)
-
-## Security Notice
-
-This password manager implements industry-standard security practices including:
-- AES-256 encryption for data at rest
-- PBKDF2 key derivation with high iteration counts
-- Cryptographically secure random number generation
-- K-anonymity for breach checking
-- Zero-knowledge architecture
-
-However, this is an educational/personal project. For critical use cases, consider established, audited password managers.
+- [cryptography](https://cryptography.io/) - Encryption library
+- [HaveIBeenPwned](https://haveibeenpwned.com/) - Breach detection API
+- [Click](https://click.palletsprojects.com/) - CLI framework
+- [tabulate](https://pypi.org/project/tabulate/) - Table formatting
 
 ---
 
-**Remember**: Use a strong master password and never share it with anyone!
+**⚠️ Security Notice**: While VaultKey implements industry-standard security practices, for mission-critical use cases consider established, audited password managers.
+
+**🔑 Remember**: Use a strong master password and never share it with anyone!
