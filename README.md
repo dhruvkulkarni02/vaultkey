@@ -4,19 +4,20 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 
-**Military-grade password manager with Argon2id encryption and zero-knowledge architecture**
+**Local, offline password manager with Argon2id key derivation and AES-256-GCM encryption**
 
-VaultKey is a secure, offline password manager that keeps your passwords encrypted locally and never sends them to any server. Your master password is never stored anywhere, ensuring complete zero-knowledge security.
+VaultKey is a secure, offline password manager that keeps your passwords encrypted locally and never sends them to any server. Your master password is never stored, and nothing derived from it can be checked faster than a full Argon2id computation.
 
 ## 🚀 Features
 
-- **🔒 Military-Grade Security**: Argon2id memory-hard key derivation with 64MB memory cost
-- **🛡️ Zero-Knowledge Architecture**: Your passwords never leave your device
-- **✅ Integrity Protection**: HMAC-SHA256 verification prevents tampering
+- **🔒 Strong Encryption**: AES-256-GCM with a key from Argon2id (64 MB memory cost)
+- **🛡️ Local Only**: Your passwords never leave your device
+- **✅ Tamper Detection**: Authenticated encryption detects any modification of the vault
+- **💥 Crash-Safe Writes**: The vault is replaced atomically, so a crash never corrupts it
 - **🚫 Account Lockout Protection**: Automatic lockout after failed attempts
-- **📋 Secure Clipboard**: Auto-clearing clipboard with original content restoration
+- **📋 Secure Clipboard**: Copied passwords are cleared after a timeout, even after the command exits
 - **🔄 Vault Versioning**: Backward compatibility with version management
-- **💾 Secure Backups**: Independent encryption keys for backup files
+- **💾 Secure Backups**: Self-contained encrypted backup files with their own password
 - **🔍 Breach Detection**: Check passwords against known data breaches
 - **📊 Security Auditing**: Comprehensive password strength analysis
 - **🎯 Interactive Mode**: Professional CLI interface with color coding
@@ -75,7 +76,7 @@ vk cp github                                      # Quick copy to clipboard
 
 # Search passwords
 vk search github                                  # Search by site/username
-vk search --type weak                             # Find weak passwords
+vk search --type weak                             # Find weak passwords (query is optional)
 vk search --type old                              # Find old passwords
 
 # List all passwords
@@ -121,19 +122,27 @@ vk interactive                                    # Launch interactive UI
 # Delete passwords
 vk delete github.com                              # Delete with confirmation
 vk delete github.com -f                           # Force delete
+
+# Master password and backups
+vk passwd                                         # Change the master password
+vk backup -o ~/vault.vkbak                        # Self-contained encrypted backup
+vk restore ~/vault.vkbak                          # Restore (also onto a new machine)
 ```
 
 ## 🔒 Security Overview
 
 VaultKey implements industry-leading security practices:
 
-- **Zero-Knowledge Architecture**: Master passwords are never stored
-- **Argon2id Key Derivation**: Memory-hard function with 64MB memory cost
-- **AES-256 Encryption**: Military-grade encryption for all data
-- **HMAC-SHA256 Integrity**: Tamper detection for vault files
+- **Master password never stored**: Only an Argon2id-derived key can decrypt the vault
+- **Argon2id Key Derivation**: Memory-hard function with 64MB memory cost; parameters and salt are stored in the vault header, so the vault file is self-contained
+- **AES-256-GCM Encryption**: Authenticated encryption; the header is bound to the ciphertext
+- **Atomic Writes**: Vault and backups are written to a temporary file (mode 0600) and renamed into place
 - **K-Anonymity**: Breach checking without exposing passwords
-- **Secure Memory Handling**: Minimizes sensitive data exposure
-- **Account Lockout**: Protection against brute-force attacks
+- **Lockout in interactive mode**: Repeated wrong passwords are refused for 5 minutes. Offline guessing is limited by the cost of Argon2id, not by the lockout
+
+### Upgrading from 1.0.x
+
+Vaults created by VaultKey 1.0.x are converted to the new format the first time you unlock them; `salt.bin` is no longer needed afterwards. The 1.0.x format stored a check value that allowed fast offline guessing of the master password, so if old copies of your vault file may exist (backups, synced folders), **change your master password** (`vk passwd`) after upgrading.
 
 ## 📚 Command Reference
 
@@ -147,6 +156,7 @@ VaultKey implements industry-leading security practices:
 | `vk search` | Search passwords by site/username/notes |
 | `vk cp` | Quick copy password to clipboard |
 | `vk delete` | Remove a password entry |
+| `vk passwd` | Change the master password |
 
 ### Security Commands
 | Command | Description |
@@ -160,6 +170,8 @@ VaultKey implements industry-leading security practices:
 |---------|-------------|
 | `vk import-passwords` | Import from other password managers |
 | `vk export-passwords` | Export passwords to file |
+| `vk backup` | Create an encrypted backup file |
+| `vk restore` | Restore the vault from a backup |
 | `vk interactive` | Launch interactive mode |
 
 ## 🐍 Python API
@@ -175,7 +187,8 @@ pm.unlock("your-master-password")
 pm.add_password("github.com", "username", "password123")
 
 # Generate and store a secure password
-secure_pass = pm.generate_password(length=20)
+from vaultkey import generate_password
+secure_pass = generate_password(length=20)
 pm.add_password("example.com", "user@example.com", secure_pass)
 
 # Retrieve a password
@@ -209,11 +222,8 @@ vaultkey/
 ### Running Tests
 
 ```bash
-# Run basic functionality test
-python -c "from vaultkey.cli import cli; print('✅ VaultKey imports successfully')"
-
-# Test password generation
-python -c "from vaultkey.generator import generate_password; print('Generated:', generate_password(16))"
+pip install -e ".[dev]"
+pytest
 ```
 
 ### Contributing
@@ -238,7 +248,7 @@ If you discover a security vulnerability, please open a private security advisor
 - [x] Breach detection (HaveIBeenPwned integration)
 - [x] Import/export functionality (CSV, JSON, LastPass, etc.)
 - [x] Interactive mode with professional UI
-- [x] HMAC-SHA256 integrity verification
+- [x] Authenticated AES-256-GCM encryption with a self-describing vault header
 
 ### Planned 📋
 - [ ] Desktop GUI application

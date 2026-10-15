@@ -2,139 +2,214 @@
 crypto.py - Handles all encryption and decryption operations
 This is the security core of VaultKey
 """
-import os
 import base64
-from cryptography.fernet import Fernet
+import binascii
+import json
+import os
+import struct
+from typing import Dict, Iterator, Optional, Tuple
+
+from argon2.low_level import Type, hash_secret_raw
+from cryptography.exceptions import InvalidTag
+from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-import argon2
+
+from .errors import DecryptionError, VaultFormatError
+
+# Argon2id cost for newly encrypted data. The parameters are recorded in every
+# envelope header, so they can be raised later without breaking existing vaults.
+DEFAULT_KDF_PARAMS = {
+    "time_cost": 3,         # iterations
+    "memory_cost": 65536,   # KiB (64 MiB)
+    "parallelism": 4,       # lanes
+}
+
+# Bounds applied to parameters read from a file, so a crafted header can't make
+# us allocate gigabytes of memory or spin for hours before failing.
+_KDF_LIMITS = {
+    "time_cost": (1, 64),
+    "memory_cost": (8 * 1024, 4 * 1024 * 1024),  # 8 MiB .. 4 GiB
+    "parallelism": (1, 64),
+}
+
+SALT_SIZE = 32
+NONCE_SIZE = 12
+KEY_SIZE = 32
+ENVELOPE_VERSION = 1
+_HEADER_LENGTH = struct.Struct(">H")
+
+
+def derive_key(master_password: str, salt: bytes, kdf_params: Dict[str, int]) -> bytes:
+    """Derive a 256-bit key from the master password with Argon2id."""
+    return hash_secret_raw(
+        secret=master_password.encode("utf-8"),
+        salt=salt,
+        time_cost=kdf_params["time_cost"],
+        memory_cost=kdf_params["memory_cost"],
+        parallelism=kdf_params["parallelism"],
+        hash_len=KEY_SIZE,
+        type=Type.ID,
+    )
 
 
 class Crypto:
-    """Handles encryption/decryption using Fernet (AES-128 + HMAC)"""
-    
+    """
+    Encrypts data with AES-256-GCM under a key derived from the master password
+    with Argon2id.
+
+    Every ciphertext is a self-describing envelope:
+
+        header length (2 bytes, big-endian) | header (JSON) | nonce (12 bytes) | ciphertext + tag
+
+    The header records the KDF, its parameters and the salt, and is authenticated
+    as associated data. An envelope can therefore be decrypted with nothing but
+    the password - there is no separate salt file to lose.
+    """
+
     def __init__(self):
-        self.key = None
-        self.salt_file = "salt.bin"
-        
-    def create_key(self, master_password: str) -> None:
+        self.key: Optional[bytes] = None
+        self.salt: Optional[bytes] = None
+        self.kdf_params: Dict[str, int] = dict(DEFAULT_KDF_PARAMS)
+
+    def create_key(
+        self,
+        master_password: str,
+        salt: Optional[bytes] = None,
+        kdf_params: Optional[Dict[str, int]] = None,
+    ) -> None:
         """
-        Derive an encryption key from the master password.
-        
-        This uses Argon2id (upgraded from PBKDF2) to:
-        1. Provide memory-hard key derivation resistant to GPU/ASIC attacks
-        2. Use a salt to prevent rainbow table attacks
-        3. Generate a 256-bit key suitable for Fernet
+        Derive the encryption key from the master password.
+
+        A fresh random salt is generated unless one is given, so the same
+        password produces a different key for every vault.
         """
-        # Step 1: Get or create a salt
-        # Salt ensures same password generates different keys for different vaults
-        if os.path.exists(self.salt_file):
-            with open(self.salt_file, 'rb') as f:
-                salt = f.read()
-        else:
-            # Generate a new random 32-byte salt (increased from 16)
-            salt = os.urandom(32)
-            with open(self.salt_file, 'wb') as f:
-                f.write(salt)
-        
-        # Step 2: Use Argon2id for key derivation (memory-hard function)
-        try:
-            # Use Argon2id with high memory cost for better security
-            hasher = argon2.PasswordHasher(
-                time_cost=3,      # 3 iterations
-                memory_cost=65536,  # 64MB memory
-                parallelism=4,    # 4 parallel threads
-                hash_len=32,      # 32 bytes output
-                salt_len=32       # 32 bytes salt
-            )
-            
-            # Generate key using Argon2id
-            key_hash = hasher.hash(master_password, salt=salt)
-            # Extract just the hash part (remove the parameters)
-            key_bytes = key_hash.split('$')[-1].encode()
-            key = base64.urlsafe_b64encode(base64.b64decode(key_bytes + b'=='))
-            
-        except Exception:
-            # Fallback to PBKDF2 for compatibility if Argon2 fails
-            print("⚠️  Warning: Falling back to PBKDF2 (install argon2-cffi for better security)")
-            kdf = PBKDF2HMAC(
-                algorithm=hashes.SHA256(),
-                length=32,  # 32 bytes = 256 bits
-                salt=salt,
-                iterations=100000,  # More iterations = slower but more secure
-            )
-            key = base64.urlsafe_b64encode(kdf.derive(master_password.encode()))
-        
-        # Step 4: Create Fernet instance with the key
-        self.key = Fernet(key)
-    
+        params = kdf_params or DEFAULT_KDF_PARAMS
+        self.salt = salt if salt is not None else os.urandom(SALT_SIZE)
+        self.kdf_params = {name: int(params[name]) for name in _KDF_LIMITS}
+        self.key = derive_key(master_password, self.salt, self.kdf_params)
+
+    @classmethod
+    def from_envelope(cls, master_password: str, envelope: bytes) -> Tuple["Crypto", str]:
+        """
+        Derive the key described by an envelope's header and decrypt it.
+
+        Returns:
+            (crypto, plaintext) - the Crypto instance can re-encrypt with the same key
+
+        Raises:
+            DecryptionError: Wrong password, or the envelope was tampered with
+            VaultFormatError: The envelope is malformed
+        """
+        header = _parse_envelope(envelope)[1]
+        crypto = cls()
+        crypto.create_key(master_password, header["salt"], header["kdf_params"])
+        return crypto, crypto.decrypt(envelope)
+
     def encrypt(self, data: str) -> bytes:
+        """Encrypt a string and return an envelope (see class docstring)."""
+        if not self.key:
+            raise ValueError("No encryption key set. Call create_key first.")
+
+        header = json.dumps(
+            {
+                "v": ENVELOPE_VERSION,
+                "kdf": "argon2id",
+                "kdf_params": self.kdf_params,
+                "salt": base64.b64encode(self.salt).decode("ascii"),
+                "cipher": "aes-256-gcm",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        associated_data = _HEADER_LENGTH.pack(len(header)) + header
+
+        # A random 96-bit nonce per encryption; the key changes whenever the
+        # master password does, so nonce reuse is not a practical concern.
+        nonce = os.urandom(NONCE_SIZE)
+        ciphertext = AESGCM(self.key).encrypt(nonce, data.encode("utf-8"), associated_data)
+        return associated_data + nonce + ciphertext
+
+    def decrypt(self, envelope: bytes) -> str:
         """
-        Encrypt a string and return encrypted bytes.
-        
-        Fernet guarantees:
-        - Data is encrypted with AES-128 in CBC mode
-        - HMAC authentication to detect tampering
-        - Timestamp to support key rotation (optional)
+        Decrypt an envelope produced by encrypt() with the same key.
+
+        Raises:
+            DecryptionError: Wrong key, or the envelope was tampered with
+            VaultFormatError: The envelope is malformed
         """
         if not self.key:
             raise ValueError("No encryption key set. Call create_key first.")
-        
-        # Fernet requires bytes, so encode the string
-        return self.key.encrypt(data.encode('utf-8'))
-    
-    def decrypt(self, encrypted_data: bytes) -> str:
-        """
-        Decrypt bytes and return the original string.
-        
-        Will raise an exception if:
-        - Wrong password was used (invalid key)
-        - Data has been tampered with (HMAC fails)
-        - Data is corrupted
-        """
-        if not self.key:
-            raise ValueError("No encryption key set. Call create_key first.")
-        
-        # Decrypt and decode back to string
-        decrypted_bytes = self.key.decrypt(encrypted_data)
-        return decrypted_bytes.decode('utf-8')
-    
-    def verify_password(self, master_password: str, test_data: bytes) -> bool:
-        """
-        Verify if a master password is correct by trying to decrypt test data.
-        Returns True if password is correct, False otherwise.
-        """
+
+        associated_data, header, nonce, ciphertext = _parse_envelope(envelope)
+        if header["salt"] != self.salt or header["kdf_params"] != self.kdf_params:
+            raise DecryptionError("Data was encrypted with a different key")
+
         try:
-            # Create a temporary key with the provided password
-            temp_crypto = Crypto()
-            temp_crypto.salt_file = self.salt_file  # Use same salt
-            temp_crypto.create_key(master_password)
-            
-            # Try to decrypt
-            temp_crypto.decrypt(test_data)
-            return True
-        except Exception:
-            # Any decryption error means wrong password
-            return False
+            plaintext = AESGCM(self.key).decrypt(nonce, ciphertext, associated_data)
+        except InvalidTag:
+            raise DecryptionError("Wrong password, or the data is corrupted") from None
+        return plaintext.decode("utf-8")
 
 
-# Example usage (for testing)
-if __name__ == "__main__":
-    # Create crypto instance
-    crypto = Crypto()
-    
-    # Set up encryption with a master password
-    crypto.create_key("my-super-secret-password")
-    
-    # Encrypt some data
-    secret_data = "My GitHub password is: ghp_abcd1234"
-    encrypted = crypto.encrypt(secret_data)
-    print(f"Encrypted: {encrypted[:50]}...")  # Show first 50 chars
-    
-    # Decrypt it back
-    decrypted = crypto.decrypt(encrypted)
-    print(f"Decrypted: {decrypted}")
-    
-    # Verify it worked
-    assert secret_data == decrypted
-    print("✓ Encryption/decryption working correctly!")
+def _parse_envelope(envelope: bytes) -> Tuple[bytes, Dict, bytes, bytes]:
+    """Split an envelope into (associated data, validated header, nonce, ciphertext)."""
+    if len(envelope) < _HEADER_LENGTH.size:
+        raise VaultFormatError("Encrypted data is truncated")
+    (header_length,) = _HEADER_LENGTH.unpack_from(envelope)
+    header_end = _HEADER_LENGTH.size + header_length
+    if len(envelope) < header_end + NONCE_SIZE + 16:
+        raise VaultFormatError("Encrypted data is truncated")
+
+    try:
+        raw = json.loads(envelope[_HEADER_LENGTH.size:header_end].decode("utf-8"))
+        if raw["v"] != ENVELOPE_VERSION:
+            raise VaultFormatError(f"Unsupported envelope version: {raw['v']}")
+        if raw["kdf"] != "argon2id" or raw["cipher"] != "aes-256-gcm":
+            raise VaultFormatError(f"Unsupported algorithms: {raw['kdf']}/{raw['cipher']}")
+        kdf_params = {name: int(raw["kdf_params"][name]) for name in _KDF_LIMITS}
+        salt = base64.b64decode(raw["salt"], validate=True)
+    except (UnicodeDecodeError, ValueError, KeyError, TypeError, binascii.Error) as e:
+        raise VaultFormatError(f"Malformed encryption header: {e}") from None
+
+    for name, (low, high) in _KDF_LIMITS.items():
+        if not low <= kdf_params[name] <= high:
+            raise VaultFormatError(f"KDF parameter {name}={kdf_params[name]} is out of range")
+    if kdf_params["memory_cost"] < 8 * kdf_params["parallelism"] or len(salt) < 16:
+        raise VaultFormatError("Invalid KDF parameters")
+
+    header = {"kdf_params": kdf_params, "salt": salt}
+    nonce = envelope[header_end:header_end + NONCE_SIZE]
+    return envelope[:header_end], header, nonce, envelope[header_end + NONCE_SIZE:]
+
+
+# --- VaultKey 1.0.x compatibility -------------------------------------------------
+
+# 1.0.x encrypted with Fernet, using a key derived with these Argon2id parameters
+# (or with PBKDF2 when Argon2 failed), and kept the salt in a separate file.
+LEGACY_KDF_PARAMS = {"time_cost": 3, "memory_cost": 65536, "parallelism": 4}
+
+
+def legacy_decrypt(master_password: str, salt: bytes, token: bytes) -> str:
+    """
+    Decrypt a Fernet token written by VaultKey 1.0.x.
+
+    Raises:
+        DecryptionError: Wrong password, or the data is corrupted
+    """
+    for key in _legacy_keys(master_password, salt):
+        try:
+            return Fernet(key).decrypt(token).decode("utf-8")
+        except InvalidToken:
+            continue
+    raise DecryptionError("Wrong password, or the data is corrupted")
+
+
+def _legacy_keys(master_password: str, salt: bytes) -> Iterator[bytes]:
+    """Candidate Fernet keys, in the order 1.0.x would have derived them."""
+    yield base64.urlsafe_b64encode(derive_key(master_password, salt, LEGACY_KDF_PARAMS))
+    # 1.0.x silently fell back to PBKDF2 whenever Argon2 raised, e.g. with
+    # argon2-cffi < 23.1, whose PasswordHasher.hash() has no salt argument.
+    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=100000)
+    yield base64.urlsafe_b64encode(kdf.derive(master_password.encode()))
