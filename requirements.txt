@@ -3,4 +3,4 @@ click
 tabulate
 pyperclip
 requests
-argon2-cffi
+argon2-cffi>=21.2.0

@@ -6,22 +6,22 @@ import click
 import getpass
 import sys
 import os
-import hashlib
 from typing import Optional
 from tabulate import tabulate
 from datetime import datetime
-import threading
 import time
 
-from . import __version__
-from .manager import PasswordManager
+from . import __author__, __version__
+from .clipboard import copy_with_autoclear, run_clearer
+from .errors import VaultError
+from .manager import PasswordManager, default_vault_path
 from .generator import generate_password
 from .strength import PasswordStrength, format_strength_bar
 from .breach import BreachChecker
 from .portability import VaultImporter, VaultExporter
 
 # Initialize password manager with default vault file
-DEFAULT_VAULT = os.path.expanduser("~/.vaultkey/passwords.encrypted")
+DEFAULT_VAULT = default_vault_path()
 pm = None
 
 
@@ -50,53 +50,29 @@ def prompt_master_password(confirm: bool = False) -> Optional[str]:
     return password
 
 
-def secure_clipboard_copy(password: str, timeout: int = 30):
-    """Securely copy password to clipboard with auto-clear and restoration"""
-    try:
-        import pyperclip
-        
-        # Save current clipboard content
-        try:
-            original_clipboard = pyperclip.paste()
-        except:
-            original_clipboard = ""
-        
-        # Copy password to clipboard
-        pyperclip.copy(password)
-        
-        def clear_and_restore():
-            time.sleep(timeout)
-            try:
-                # Only clear if it's still our password
-                current = pyperclip.paste()
-                if current == password:
-                    # Restore original content or clear
-                    pyperclip.copy(original_clipboard if original_clipboard else "")
-            except:
-                pass
-        
-        if timeout > 0:
-            thread = threading.Thread(target=clear_and_restore, daemon=True)
-            thread.start()
-            return True
-        return True
-        
-    except ImportError:
-        return False
-
-
-def clear_clipboard_after_delay(seconds):
-    """Clear clipboard after specified seconds (legacy function)"""
-    def clear():
-        time.sleep(seconds)
-        try:
-            import pyperclip
-            pyperclip.copy("")
-        except:
-            pass
+def unlock_vault(pm: PasswordManager) -> str:
+    """Prompt for the master password and unlock the vault, or exit with an error.
     
-    thread = threading.Thread(target=clear, daemon=True)
-    thread.start()
+    Returns:
+        The master password
+    """
+    password = prompt_master_password()
+    try:
+        if password and pm.unlock(password):
+            return password
+        click.echo("❌ Invalid master password!", err=True)
+    except VaultError as e:
+        click.echo(f"❌ {e}", err=True)
+    sys.exit(1)
+
+
+def secure_clipboard_copy(password: str, timeout: int = 30) -> bool:
+    """Copy password to clipboard; it is cleared (and the previous content restored)
+    after `timeout` seconds, even if this process has exited by then"""
+    try:
+        return copy_with_autoclear(password, timeout)
+    except Exception:
+        return False
 
 
 @click.group()
@@ -104,7 +80,7 @@ def clear_clipboard_after_delay(seconds):
 def cli():
     """VaultKey - A secure password manager
     
-    Military-grade password manager with Argon2id encryption and zero-knowledge architecture.
+    Local password manager with Argon2id key derivation and AES-256-GCM encryption.
     Your passwords are encrypted locally and never leave your device.
     Your master password is never stored anywhere.
     """
@@ -122,10 +98,10 @@ def init():
         if not click.confirm("Do you want to delete it and create a new one?"):
             return
         
-        # Delete existing vault
+        # Delete existing vault (and the salt file VaultKey 1.0 kept beside it)
         pm.storage.delete()
-        if os.path.exists("salt.bin"):
-            os.remove("salt.bin")
+        if os.path.exists(pm.legacy_salt_file):
+            os.remove(pm.legacy_salt_file)
     
     click.echo("🔐 Creating a new password vault...\n")
     click.echo("Choose a strong master password.")
@@ -148,6 +124,28 @@ def init():
 
 
 @cli.command()
+def passwd():
+    """Change the master password"""
+    pm = get_password_manager()
+    current = unlock_vault(pm)
+    
+    try:
+        click.echo("\n🔐 Choose a new master password.")
+        new_password = prompt_master_password(confirm=True)
+        if not new_password:
+            sys.exit(1)
+        
+        pm.change_master_password(current, new_password)
+        click.echo("✅ Master password changed!")
+        click.echo("   Existing backups keep the password they were created with.")
+    except Exception as e:
+        click.echo(f"❌ Error changing master password: {e}", err=True)
+        sys.exit(1)
+    finally:
+        pm.lock()
+
+
+@cli.command()
 @click.option('--site', '-s', prompt="Site/Service", help='Website or service name')
 @click.option('--username', '-u', prompt="Username", help='Username or email')
 @click.option('--generate', '-g', is_flag=True, help='Generate a secure password')
@@ -159,10 +157,7 @@ def add(site, username, generate, length, no_symbols, notes):
     pm = get_password_manager()
     
     # Unlock vault
-    password = prompt_master_password()
-    if not password or not pm.unlock(password):
-        click.echo("❌ Invalid master password!", err=True)
-        sys.exit(1)
+    unlock_vault(pm)
     
     try:
         # Get or generate password
@@ -201,10 +196,7 @@ def get(site, show, copy):
     pm = get_password_manager()
     
     # Unlock vault
-    password = prompt_master_password()
-    if not password or not pm.unlock(password):
-        click.echo("❌ Invalid master password!", err=True)
-        sys.exit(1)
+    unlock_vault(pm)
     
     try:
         # Search for exact match first
@@ -218,10 +210,9 @@ def get(site, show, copy):
                 for match in matches[:5]:  # Show max 5 matches
                     click.echo(f"  • {match}")
                 
-                if len(matches) == 1:
-                    if click.confirm(f"\nRetrieve password for {matches[0]}?"):
-                        site = matches[0]
-                        creds = pm.get_password(site)
+                if len(matches) == 1 and click.confirm(f"\nRetrieve password for {matches[0]}?"):
+                    site = matches[0]
+                    creds = pm.get_password(site)
                 else:
                     return
             else:
@@ -269,10 +260,7 @@ def list(filter, verbose, sort, weak_only):
     analyzer = PasswordStrength() if (weak_only or sort == 'strength') else None
     
     # Unlock vault
-    password = prompt_master_password()
-    if not password or not pm.unlock(password):
-        click.echo("❌ Invalid master password!", err=True)
-        sys.exit(1)
+    unlock_vault(pm)
     
     try:
         # Get sites
@@ -433,10 +421,7 @@ def delete(site, force):
     pm = get_password_manager()
     
     # Unlock vault
-    password = prompt_master_password()
-    if not password or not pm.unlock(password):
-        click.echo("❌ Invalid master password!", err=True)
-        sys.exit(1)
+    unlock_vault(pm)
     
     try:
         # Check if site exists
@@ -462,20 +447,20 @@ def delete(site, force):
 
 
 @cli.command()
-@click.argument('query')
+@click.argument('query', required=False, default='')
 @click.option('--type', '-t', type=click.Choice(['all', 'weak', 'strong', 'old', 'recent']), 
               default='all', help='Filter by type')
 @click.option('--show-passwords', '-p', is_flag=True, help='Show passwords in results')
 def search(query, type, show_passwords):
-    """Search passwords by site, username, or notes"""
+    """Search passwords by site, username, or notes
+    
+    Without QUERY, every entry is searched, e.g. 'vk search --type weak'.
+    """
     pm = get_password_manager()
     analyzer = PasswordStrength()
     
     # Unlock vault
-    password = prompt_master_password()
-    if not password or not pm.unlock(password):
-        click.echo("❌ Invalid master password!", err=True)
-        sys.exit(1)
+    unlock_vault(pm)
     
     try:
         query_lower = query.lower()
@@ -534,7 +519,7 @@ def search(query, type, show_passwords):
                 results.append(result)
         
         if not results:
-            click.echo(f"No passwords found matching '{query}'")
+            click.echo(f"No passwords found matching '{query}'" if query else "No passwords found")
             return
         
         # Sort by relevance (exact matches first)
@@ -543,7 +528,7 @@ def search(query, type, show_passwords):
             x['site'].lower()
         ))
         
-        click.echo(f"\n🔍 Found {len(results)} password(s) matching '{query}'")
+        click.echo(f"\n🔍 Found {len(results)} password(s)" + (f" matching '{query}'" if query else ""))
         
         if type != 'all':
             click.echo(f"   Filtered by: {type}")
@@ -602,10 +587,7 @@ def cp(site, timeout):
     pm = get_password_manager()
     
     # Unlock vault
-    password = prompt_master_password()
-    if not password or not pm.unlock(password):
-        click.echo("❌ Invalid master password!", err=True)
-        sys.exit(1)
+    unlock_vault(pm)
     
     try:
         # Try exact match first
@@ -696,10 +678,7 @@ def import_passwords(file, format):
         return
     
     # Unlock vault
-    password = prompt_master_password()
-    if not password or not pm.unlock(password):
-        click.echo("❌ Invalid master password!", err=True)
-        sys.exit(1)
+    unlock_vault(pm)
     
     try:
         importer = VaultImporter()
@@ -707,29 +686,10 @@ def import_passwords(file, format):
         click.echo(f"Importing from {format} format...")
         passwords = importer.import_file(file, format)
         
-        imported_count = 0
-        skipped_count = 0
-        
-        for site, data in passwords.items():
-            try:
-                # Check if password already exists
-                existing = pm.get_password(site)
-                if existing:
-                    skipped_count += 1
-                    click.echo(f"  Skipping {site} (already exists)")
-                else:
-                    pm.add_password(
-                        site=site, 
-                        username=data.get('username', ''), 
-                        password=data.get('password', ''), 
-                        notes=data.get('notes', '')
-                    )
-                    imported_count += 1
-                    if imported_count % 10 == 0:
-                        click.echo(f"  Imported {imported_count} passwords...")
-            except Exception as e:
-                click.echo(f"  Error importing {site}: {e}")
-                skipped_count += 1
+        imported, skipped = pm.import_entries(passwords)
+        for site in skipped:
+            click.echo(f"  Skipping {site} (already exists)")
+        imported_count, skipped_count = len(imported), len(skipped)
         
         click.echo(f"\n✅ Import complete!")
         click.echo(f"   Imported: {imported_count} passwords")
@@ -762,10 +722,7 @@ def export_passwords(format, output, include_passwords):
         click.echo("⚠️  WARNING: Exporting without passwords (use --include-passwords to include)")
     
     # Unlock vault
-    password = prompt_master_password()
-    if not password or not pm.unlock(password):
-        click.echo("❌ Invalid master password!", err=True)
-        sys.exit(1)
+    unlock_vault(pm)
     
     try:
         exporter = VaultExporter()
@@ -836,10 +793,7 @@ def audit(breaches, verbose, weak_only, old_only):
     analyzer = PasswordStrength()
     
     # Unlock vault
-    password = prompt_master_password()
-    if not password or not pm.unlock(password):
-        click.echo("❌ Invalid master password!", err=True)
-        sys.exit(1)
+    unlock_vault(pm)
     
     try:
         sites = pm.list_sites()
@@ -859,6 +813,7 @@ def audit(breaches, verbose, weak_only, old_only):
             'weak': 0,
             'very_weak': 0,
             'breached': 0,
+            'breach_errors': 0,
             'old': 0,
             'duplicates': 0
         }
@@ -929,6 +884,8 @@ def audit(breaches, verbose, weak_only, old_only):
             is_breached = False
             if breach_checker:
                 breach_result = breach_checker.check_password(password_text)
+                if breach_result['error']:
+                    stats['breach_errors'] += 1
                 is_breached = breach_result['count'] > 0
                 if is_breached:
                     stats['breached'] += 1
@@ -1063,6 +1020,9 @@ def audit(breaches, verbose, weak_only, old_only):
         if breaches and stats['breached'] > 0:
             click.echo(f"🚨 Breached passwords: {stats['breached']} ({stats['breached']/stats['total']*100:.1f}%)")
         
+        if stats['breach_errors'] > 0:
+            click.echo(f"❌ Breach check failed for {stats['breach_errors']} password(s) - check your internet connection")
+        
         # Recommendations
         click.echo(f"\n💡 Recommendations:")
         recommendations = []
@@ -1077,6 +1037,8 @@ def audit(breaches, verbose, weak_only, old_only):
             recommendations.append(f"• Change {stats['duplicates']} duplicate password(s)")
         if breaches and stats['breached'] > 0:
             recommendations.append(f"• URGENT: Change {stats['breached']} breached password(s)")
+        if stats['breach_errors'] > 0:
+            recommendations.append(f"• Re-run the breach check for {stats['breach_errors']} password(s) that could not be checked")
         
         if recommendations:
             for rec in recommendations:
@@ -1125,10 +1087,7 @@ def breaches(site, verbose):
     pm = get_password_manager()
     
     # Unlock vault
-    password = prompt_master_password()
-    if not password or not pm.unlock(password):
-        click.echo("❌ Invalid master password!", err=True)
-        sys.exit(1)
+    unlock_vault(pm)
     
     try:
         breach_checker = BreachChecker()
@@ -1167,6 +1126,7 @@ def breaches(site, verbose):
         
         breached_passwords = []
         clean_passwords = []
+        failed_checks = []
         
         # Check each password
         for i, site_name in enumerate(sites, 1):
@@ -1179,7 +1139,9 @@ def breaches(site, verbose):
             # Check against breaches
             result = breach_checker.check_password(password_text)
             
-            if result['count'] > 0:
+            if result['error']:
+                failed_checks.append({'site': site_name, 'message': result['message']})
+            elif result['count'] > 0:
                 breached_passwords.append({
                     'site': site_name,
                     'username': data.get('username', ''),
@@ -1224,13 +1186,23 @@ def breaches(site, verbose):
                 for clean in clean_passwords:
                     click.echo(f"   🟢 {clean['site']} ({clean['username']})")
         
+        if failed_checks:
+            click.echo(f"\n❌ Could not check {len(failed_checks)} password(s):")
+            for failed in failed_checks:
+                click.echo(f"   {failed['site']}: {failed['message']}")
+        
         # Summary and recommendations
-        total_checked = len(sites)
+        total_checked = len(sites) - len(failed_checks)
+        if total_checked == 0:
+            click.echo("\n❌ Breach check failed - make sure you have an internet connection", err=True)
+            sys.exit(1)
         breach_percentage = (len(breached_passwords) / total_checked) * 100
         
         click.echo(f"\n📊 Breach Check Summary:")
         click.echo("=" * 30)
         click.echo(f"Passwords checked: {total_checked}")
+        if failed_checks:
+            click.echo(f"Not checked (errors): {len(failed_checks)}")
         click.echo(f"Breached: {len(breached_passwords)} ({breach_percentage:.1f}%)")
         click.echo(f"Clean: {len(clean_passwords)} ({100-breach_percentage:.1f}%)")
         
@@ -1252,7 +1224,7 @@ def breaches(site, verbose):
                 click.echo(f"⚠️  HIGH priority: {', '.join([b['site'] for b in high])}")
             if medium:
                 click.echo(f"⚠️  MEDIUM priority: {', '.join([b['site'] for b in medium])}")
-        else:
+        elif not failed_checks:
             click.echo(f"\n🎉 Great! None of your passwords were found in known breaches.")
             click.echo(f"   Keep up the good security practices!")
         
@@ -1273,10 +1245,7 @@ def backup(password, output):
     pm = get_password_manager()
     
     # Unlock vault
-    master_password = prompt_master_password()
-    if not master_password or not pm.unlock(master_password):
-        click.echo("❌ Invalid master password!", err=True)
-        sys.exit(1)
+    master_password = unlock_vault(pm)
     
     try:
         # Use provided backup password or prompt for one
@@ -1298,7 +1267,7 @@ def backup(password, output):
         backup_path = pm.create_secure_backup(backup_password, output)
         
         click.echo(f"\n✅ Secure backup created: {backup_path}")
-        click.echo("   This backup is encrypted and portable.")
+        click.echo("   This single file is encrypted and portable; it is all you need to restore.")
         click.echo("   Store it in a safe location separate from your main vault.")
         
     except Exception as e:
@@ -1329,18 +1298,15 @@ def restore(backup_file, password):
     # Get backup password
     backup_password = password
     if not backup_password:
-        backup_password = prompt_master_password()
+        backup_password = getpass.getpass("Backup password: ")
         if not backup_password:
             click.echo("❌ Restore cancelled!", err=True)
             return
     
-    # Unlock current vault (if exists) to get master password for re-encryption
+    # Unlock the current vault (if any): the restored data keeps its master password
     master_password = None
     if pm.storage.exists():
-        master_password = prompt_master_password()
-        if not master_password or not pm.unlock(master_password):
-            click.echo("❌ Invalid master password!", err=True)
-            sys.exit(1)
+        unlock_vault(pm)
     else:
         # New vault - get master password for the restored vault
         click.echo("\n🔐 Master Password for Restored Vault:")
@@ -1350,18 +1316,8 @@ def restore(backup_file, password):
             return
     
     try:
-        # Restore from backup
-        if pm.restore_from_backup(backup_file, backup_password):
-            # Re-encrypt with current master password
-            pm.master_password_hash = hashlib.sha256(master_password.encode()).digest()
-            pm.crypto.create_key(master_password)
-            pm._save()
-            
-            click.echo("\n✅ Vault successfully restored from backup!")
-        else:
-            click.echo("❌ Failed to restore from backup!", err=True)
-            sys.exit(1)
-        
+        backup_date = pm.restore_from_backup(backup_file, backup_password, master_password)
+        click.echo(f"\n✅ Vault successfully restored from backup created on {backup_date}!")
     except Exception as e:
         click.echo(f"❌ Restore failed: {e}", err=True)
         sys.exit(1)
@@ -1392,7 +1348,12 @@ def interactive():
     click.echo("    " + "─" * 30)
     password = getpass.getpass("    Password: ")
     
-    if not password or not pm.unlock(password):
+    try:
+        unlocked = bool(password) and pm.unlock(password)
+    except VaultError as e:
+        click.echo(f"\n    ❌ {e}")
+        unlocked = False
+    if not unlocked:
         click.echo("\n    ❌ Authentication failed")
         time.sleep(1)
         return
@@ -1425,7 +1386,7 @@ def show_welcome_screen():
     click.echo("    ║                                                       ║")
     click.echo("    ╚═══════════════════════════════════════════════════════╝")
     click.echo()
-    click.echo("    🔒 Military-grade encryption (AES-256)")
+    click.echo("    🔒 AES-256-GCM encryption with Argon2id key derivation")
     click.echo("    📱 Local storage - your data never leaves your device")
     click.echo("    🚀 Fast, secure, and easy to use")
     click.echo()
@@ -1444,7 +1405,7 @@ def show_splash_screen():
     click.echo(click.style("      ╚═══╝  ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝   ╚═╝  ╚═╝╚══════╝   ╚═╝   ", fg='cyan'))
     click.echo()
     click.echo(click.style("                        Professional Password Manager", fg='white', dim=True))
-    click.echo(click.style("                              Version 0.1.0", fg='white', dim=True))
+    click.echo(click.style(f"                              Version {__version__}", fg='white', dim=True))
     time.sleep(1)
 
 
@@ -1685,12 +1646,9 @@ def add_password_professional(pm):
         show_success(f"Password saved for {site}")
         
         if confirm_action("Copy password to clipboard?", default=True):
-            try:
-                import pyperclip
-                pyperclip.copy(password)
+            if secure_clipboard_copy(password, 30):
                 click.echo("    📋 Password copied to clipboard")
-                clear_clipboard_after_delay(30)
-            except ImportError:
+            else:
                 click.echo("    ⚠️  Clipboard not available")
     
     except Exception as e:
@@ -1791,11 +1749,8 @@ def view_password_professional(pm, site):
 
 def copy_password_professional(pm, site):
     """Copy password with professional feedback"""
-    try:
-        import pyperclip
-        data = pm.get_password(site)
-        pyperclip.copy(data['password'])
-        
+    data = pm.get_password(site)
+    if secure_clipboard_copy(data['password'], 30):
         click.echo()
         click.echo("    ┌─────────────────────────────────────────┐")
         click.echo("    │         ✅ Password Copied!             │")
@@ -1803,10 +1758,8 @@ def copy_password_professional(pm, site):
         click.echo("    │    📋 Clipboard will clear in 30s      │")
         click.echo("    └─────────────────────────────────────────┘")
         
-        clear_clipboard_after_delay(30)
         time.sleep(2)
-        
-    except ImportError:
+    else:
         show_error("Clipboard not available. Install 'pyperclip'")
         time.sleep(2)
 
@@ -1933,11 +1886,9 @@ def password_generator_professional():
         if action == "b":
             break
         elif action == "c":
-            try:
-                import pyperclip
-                pyperclip.copy(password)
-                show_success("Password copied to clipboard")
-            except ImportError:
+            if secure_clipboard_copy(password, 30):
+                show_success("Password copied to clipboard (clears in 30s)")
+            else:
                 show_error("Clipboard not available")
         elif action == "s":
             click.echo("\n    Modify Settings:")
@@ -1963,13 +1914,33 @@ def settings_professional(pm):
     choice = click.prompt("\n    Select option", type=str, default="0")
     
     if choice == "1":
-        click.echo("\n    Feature coming soon!")
+        change_master_password_professional(pm)
     elif choice == "2":
         show_statistics_professional(pm)
     elif choice == "3":
-        click.echo("\n    Use 'vk export' and 'vk import' commands")
+        click.echo("\n    Use the 'vk export-passwords' and 'vk import-passwords' commands")
     
     click.pause("\n    Press any key to continue...")
+
+
+def change_master_password_professional(pm):
+    """Change the master password from interactive mode"""
+    click.echo()
+    current = getpass.getpass("    Current master password: ")
+    new_password = getpass.getpass("    New master password: ")
+    confirm_pwd = getpass.getpass("    Confirm new password: ")
+    
+    if not new_password or new_password != confirm_pwd:
+        show_error("New passwords don't match or are empty")
+        return
+    
+    try:
+        if pm.change_master_password(current, new_password):
+            show_success("Master password changed")
+        else:
+            show_error("Current master password is incorrect")
+    except VaultError as e:
+        show_error(str(e))
 
 
 def show_statistics_professional(pm):
@@ -2036,12 +2007,18 @@ def create_new_vault():
 def version():
     """Show VaultKey version and info"""
     click.echo("\n🔐 VaultKey Password Manager")
-    click.echo("Version: 0.1.0")
-    click.echo("Author: Your Name")
+    click.echo(f"Version: {__version__}")
+    click.echo(f"Author: {__author__}")
     click.echo("License: MIT")
     click.echo("\nA secure, local password manager with strong encryption")
     click.echo("Your passwords never leave your device!")
     click.echo("\nFor help: vk --help")
+
+
+@cli.command('_clear-clipboard', hidden=True)
+def clear_clipboard_helper():
+    """Internal: clears the clipboard for secure_clipboard_copy()"""
+    run_clearer()
 
 
 # Entry point

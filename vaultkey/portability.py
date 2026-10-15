@@ -5,13 +5,13 @@ Supports CSV, JSON, and encrypted VaultKey format
 import csv
 import json
 import os
-from typing import Dict, List, Any
+from typing import Dict, List, Optional
 from datetime import datetime
 import base64
 from io import StringIO
 
-from .crypto import Crypto
-from .generator import generate_password
+from .crypto import Crypto, legacy_decrypt
+from .errors import VaultFormatError
 
 
 class VaultImporter:
@@ -20,6 +20,7 @@ class VaultImporter:
     SUPPORTED_FORMATS = {
         'vaultkey': 'VaultKey encrypted backup',
         'csv': 'Generic CSV (site,username,password)',
+        'json': 'VaultKey JSON export',
         'lastpass': 'LastPass CSV export',
         'bitwarden': 'Bitwarden CSV export',
         '1password': '1Password CSV export',
@@ -46,6 +47,8 @@ class VaultImporter:
             return self._import_vaultkey(filepath, master_password)
         elif format_type == 'csv':
             return self._import_generic_csv(filepath)
+        elif format_type == 'json':
+            return self._import_json(filepath)
         elif format_type == 'lastpass':
             return self._import_lastpass(filepath)
         elif format_type == 'bitwarden':
@@ -58,43 +61,87 @@ class VaultImporter:
             return self._import_keepass(filepath)
     
     def _import_vaultkey(self, filepath: str, master_password: str) -> Dict[str, Dict]:
-        """Import VaultKey encrypted backup"""
+        """Import VaultKey encrypted export"""
         if not master_password:
             raise ValueError("Master password required for VaultKey import")
         
         with open(filepath, 'r') as f:
             data = json.load(f)
         
-        # Decrypt the data
-        crypto = Crypto()
-        
-        # Use the salt from the backup
-        salt_data = base64.b64decode(data['salt'])
-        with open('temp_salt.bin', 'wb') as f:
-            f.write(salt_data)
-        
-        crypto.salt_file = 'temp_salt.bin'
-        crypto.create_key(master_password)
-        
         try:
-            decrypted = crypto.decrypt(base64.b64decode(data['encrypted_data']))
-            passwords_data = json.loads(decrypted)
-            
-            # Clean up temp salt
-            os.remove('temp_salt.bin')
-            
-            return passwords_data['passwords']
+            if 'envelope' in data:
+                # The envelope carries its own salt and KDF parameters
+                decrypted = Crypto.from_envelope(master_password, base64.b64decode(data['envelope']))[1]
+            else:
+                # VaultKey 1.0.x export: salt stored alongside a Fernet token
+                decrypted = legacy_decrypt(
+                    master_password,
+                    base64.b64decode(data['salt']),
+                    base64.b64decode(data['encrypted_data'])
+                )
+            return json.loads(decrypted)['passwords']
         except Exception as e:
-            # Clean up temp salt
-            if os.path.exists('temp_salt.bin'):
-                os.remove('temp_salt.bin')
             raise ValueError(f"Failed to decrypt backup: {str(e)}")
     
+    def _import_json(self, filepath: str) -> Dict[str, Dict]:
+        """Import an unencrypted VaultKey JSON export"""
+        with open(filepath, 'r', encoding='utf-8-sig') as f:
+            data = json.load(f)
+        
+        passwords = data.get('passwords') if isinstance(data, dict) else None
+        if not isinstance(passwords, dict):
+            raise VaultFormatError("Not a VaultKey JSON export (no 'passwords' object)")
+        
+        return {
+            site: {
+                'username': entry.get('username', ''),
+                'password': entry.get('password', ''),
+                'notes': entry.get('notes', ''),
+                'created': entry.get('created') or datetime.now().isoformat(),
+                'modified': entry.get('modified') or datetime.now().isoformat()
+            }
+            for site, entry in passwords.items()
+            if isinstance(entry, dict)
+        }
+    
+    @staticmethod
+    def _add_entry(passwords: Dict[str, Dict], site: str, entry: Dict) -> None:
+        """
+        Add an imported entry without overwriting another one for the same site.
+        
+        Several accounts on one site (e.g. two Gmail logins) are kept as
+        "site (username)", then "site (username) #2", ...; exact duplicates are dropped.
+        """
+        key = site
+        if key in passwords:
+            existing = passwords[key]
+            if (existing['username'], existing['password']) == (entry['username'], entry['password']):
+                return
+            base = f"{site} ({entry['username']})" if entry['username'] else site
+            key, n = base, 2
+            while key in passwords:
+                key = f"{base} #{n}"
+                n += 1
+        passwords[key] = entry
+    
+    # Header names recognised by the generic CSV importer, per field
+    CSV_COLUMN_ALIASES = {
+        'site': ['site', 'name', 'title', 'url', 'login_uri', 'website', 'service'],
+        'username': ['username', 'login_username', 'login', 'user', 'email', 'user name'],
+        'password': ['password', 'login_password', 'pass'],
+        'notes': ['notes', 'note', 'extra', 'comments', 'comment'],
+    }
+    
     def _import_generic_csv(self, filepath: str) -> Dict[str, Dict]:
-        """Import generic CSV format: site,username,password[,notes]"""
+        """
+        Import generic CSV.
+        
+        With a header row, columns are matched by name (see CSV_COLUMN_ALIASES),
+        in any order. Without one, columns must be site,username,password[,notes].
+        """
         passwords = {}
         
-        with open(filepath, 'r', encoding='utf-8-sig') as f:
+        with open(filepath, 'r', encoding='utf-8-sig', newline='') as f:
             # Try to detect delimiter
             sample = f.read(1024)
             f.seek(0)
@@ -104,47 +151,66 @@ class VaultImporter:
                 delimiter = '\t'
             
             reader = csv.reader(f, delimiter=delimiter)
-            
-            # Skip header if present
             first_row = next(reader, None)
-            header_keywords = ['site', 'username', 'password', 'url', 'title', 'name', 'login']
-            is_header = first_row and any(keyword in col.lower() for col in first_row for keyword in header_keywords)
+            if not first_row:
+                return passwords
             
-            if is_header:
-                # It's a header, skip it
-                pass
+            columns = self._map_csv_header(first_row)
+            if columns is None:
+                # No header: positional site,username,password[,notes]
+                columns = {'site': 0, 'username': 1, 'password': 2, 'notes': 3}
+                rows = [first_row]
             else:
-                # Process first row as data
-                if first_row and len(first_row) >= 3:
-                    site, username, password = first_row[0], first_row[1], first_row[2]
-                    notes = first_row[3] if len(first_row) > 3 else ""
-                    passwords[site] = {
-                        'username': username,
-                        'password': password,
-                        'notes': notes,
-                        'created': datetime.now().isoformat(),
-                        'modified': datetime.now().isoformat()
-                    }
+                rows = []
             
-            # Process remaining rows
-            for row in reader:
-                if len(row) >= 3:
-                    site, username, password = row[0], row[1], row[2]
-                    notes = row[3] if len(row) > 3 else ""
-                    
-                    # Skip empty rows
-                    if not site or not username:
-                        continue
-                    
-                    passwords[site] = {
-                        'username': username,
-                        'password': password,
-                        'notes': notes,
-                        'created': datetime.now().isoformat(),
-                        'modified': datetime.now().isoformat()
-                    }
+            for row in rows + list(reader):
+                def field(name):
+                    index = columns.get(name)
+                    return row[index] if index is not None and index < len(row) else ""
+                
+                site, username, password = field('site'), field('username'), field('password')
+                
+                # Skip empty rows
+                if not site or not password:
+                    continue
+                
+                self._add_entry(passwords, site, {
+                    'username': username,
+                    'password': password,
+                    'notes': field('notes'),
+                    'created': datetime.now().isoformat(),
+                    'modified': datetime.now().isoformat()
+                })
         
         return passwords
+    
+    def _map_csv_header(self, row: List[str]) -> Optional[Dict[str, int]]:
+        """
+        Map field name -> column index if row is a header, else return None.
+        
+        Raises:
+            ValueError: The row looks like a header, but lacks a site or password column
+        """
+        normalized = [col.strip().lower() for col in row]
+        columns = {}
+        for name, aliases in self.CSV_COLUMN_ALIASES.items():
+            # Earlier aliases win, e.g. a 'name' column beats a 'url' column for the site
+            for alias in aliases:
+                if alias in normalized:
+                    columns[name] = normalized.index(alias)
+                    break
+        
+        found = {'site', 'password'} & set(columns)
+        if not found:
+            # Data cells can coincide with aliases (e.g. a username "user"), so
+            # only a recognisable site or password column marks a header
+            return None
+        if len(found) < 2:
+            raise ValueError(
+                f"CSV header {row} has no recognisable site and password columns; "
+                f"use --format to pick the exporting password manager"
+            )
+        return columns
     
     def _import_lastpass(self, filepath: str) -> Dict[str, Dict]:
         """Import LastPass CSV export"""
@@ -168,13 +234,13 @@ class VaultImporter:
                         parsed = urlparse(site)
                         site = parsed.netloc or site
                     
-                    passwords[site] = {
+                    self._add_entry(passwords, site, {
                         'username': username,
                         'password': password,
                         'notes': notes,
                         'created': datetime.now().isoformat(),
                         'modified': datetime.now().isoformat()
-                    }
+                    })
         
         return passwords
     
@@ -196,13 +262,13 @@ class VaultImporter:
                 notes = row.get('notes', '')
                 
                 if site and username:
-                    passwords[site] = {
+                    self._add_entry(passwords, site, {
                         'username': username,
                         'password': password,
                         'notes': notes,
                         'created': datetime.now().isoformat(),
                         'modified': datetime.now().isoformat()
-                    }
+                    })
         
         return passwords
     
@@ -221,13 +287,13 @@ class VaultImporter:
                 notes = row.get('Notes') or row.get('notes', '')
                 
                 if site and username:
-                    passwords[site] = {
+                    self._add_entry(passwords, site, {
                         'username': username,
                         'password': password,
                         'notes': notes,
                         'created': datetime.now().isoformat(),
                         'modified': datetime.now().isoformat()
-                    }
+                    })
         
         return passwords
     
@@ -251,13 +317,13 @@ class VaultImporter:
                         parsed = urlparse(site)
                         site = parsed.netloc or site
                     
-                    passwords[site] = {
+                    self._add_entry(passwords, site, {
                         'username': username,
                         'password': password,
                         'notes': '',
                         'created': datetime.now().isoformat(),
                         'modified': datetime.now().isoformat()
-                    }
+                    })
         
         return passwords
     
@@ -276,13 +342,13 @@ class VaultImporter:
                 notes = row.get('Notes', '')
                 
                 if site and username:
-                    passwords[site] = {
+                    self._add_entry(passwords, site, {
                         'username': username,
                         'password': password,
                         'notes': notes,
                         'created': datetime.now().isoformat(),
                         'modified': datetime.now().isoformat()
-                    }
+                    })
         
         return passwords
 
@@ -318,7 +384,9 @@ class VaultExporter:
             raise ValueError(f"Unsupported export format: {format_type}")
         
         if filepath:
-            with open(filepath, 'w', encoding='utf-8') as f:
+            # Exports may contain plaintext passwords: create the file owner-only
+            fd = os.open(filepath, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with open(fd, 'w', encoding='utf-8', newline='') as f:
                 f.write(data)
             return f"Exported to {filepath}"
         else:
@@ -361,47 +429,22 @@ class VaultExporter:
         if not master_password:
             raise ValueError("Master password required for encrypted export")
         
-        # Create temporary crypto instance
+        # Fresh salt; the envelope records it along with the KDF parameters
         crypto = Crypto()
-        temp_salt_file = 'export_salt.bin'
-        crypto.salt_file = temp_salt_file
+        crypto.create_key(master_password)
         
-        try:
-            # Generate new salt for export
-            crypto.create_key(master_password)
-            
-            # Prepare data
-            vault_data = {
-                'version': '1.0',
-                'exported': datetime.now().isoformat(),
-                'passwords': passwords
-            }
-            
-            # Encrypt the data
-            encrypted = crypto.encrypt(json.dumps(vault_data))
-            
-            # Read the salt
-            with open(temp_salt_file, 'rb') as f:
-                salt_data = f.read()
-            
-            # Create export structure
-            export_data = {
-                'format': 'vaultkey_encrypted',
-                'version': '1.0',
-                'salt': base64.b64encode(salt_data).decode('utf-8'),
-                'encrypted_data': base64.b64encode(encrypted).decode('utf-8')
-            }
-            
-            # Clean up
-            os.remove(temp_salt_file)
-            
-            return json.dumps(export_data, indent=2)
-            
-        except Exception as e:
-            # Clean up on error
-            if os.path.exists(temp_salt_file):
-                os.remove(temp_salt_file)
-            raise e
+        vault_data = {
+            'version': '1.0',
+            'exported': datetime.now().isoformat(),
+            'passwords': passwords
+        }
+        
+        export_data = {
+            'format': 'vaultkey_encrypted',
+            'version': '2.0',
+            'envelope': base64.b64encode(crypto.encrypt(json.dumps(vault_data))).decode('utf-8')
+        }
+        return json.dumps(export_data, indent=2)
     
     def _export_lastpass_csv(self, passwords: Dict[str, Dict]) -> str:
         """Export to LastPass CSV format"""
