@@ -15,7 +15,8 @@ class BreachChecker:
         self.api_base = "https://api.pwnedpasswords.com/range/"
         self.headers = {
             'User-Agent': 'VaultKey-Password-Manager',
-            'Accept': 'application/json'
+            # Pad responses with fake entries so their size doesn't hint at the prefix
+            'Add-Padding': 'true'
         }
         self.cache = {}  # Cache API responses
         self.last_request_time = 0
@@ -68,9 +69,9 @@ class BreachChecker:
         breach_count = 0
         for line in response_text.splitlines():
             if ':' in line:
-                hash_suffix, count = line.split(':')
-                if hash_suffix == suffix:
-                    breach_count = int(count)
+                hash_suffix, count = line.split(':', 1)
+                if hash_suffix.strip().upper() == suffix:
+                    breach_count = int(count.strip())  # Padding entries have count 0
                     break
         
         # Analyze results

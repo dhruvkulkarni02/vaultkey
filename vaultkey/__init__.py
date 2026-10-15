@@ -1,9 +1,9 @@
 """
-VaultKey - Military-grade password manager with enhanced security features.
+VaultKey - Local password manager with Argon2id and AES-256-GCM encryption.
 
 Features:
 - Argon2id memory-hard key derivation
-- AES-256 encryption with integrity checking
+- AES-256-GCM authenticated encryption
 - Account lockout protection
 - Enhanced clipboard security
 - Secure backup system

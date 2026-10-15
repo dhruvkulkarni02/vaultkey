@@ -6,6 +6,10 @@ import string
 from typing import List
 
 
+# Characters that are easily confused with each other in many fonts
+AMBIGUOUS_CHARACTERS = "0O1lI|`"
+
+
 def generate_password(
     length: int = 16,
     use_uppercase: bool = True,
@@ -17,13 +21,16 @@ def generate_password(
     """
     Generate a cryptographically secure random password.
     
+    Passwords at least as long as the number of selected character types
+    contain at least one character of each type.
+    
     Args:
         length: Length of the password (default: 16)
         use_uppercase: Include uppercase letters A-Z
         use_lowercase: Include lowercase letters a-z
         use_digits: Include digits 0-9
         use_symbols: Include special characters
-        exclude_ambiguous: Exclude ambiguous characters (0, O, l, 1, etc.)
+        exclude_ambiguous: Exclude ambiguous characters (see AMBIGUOUS_CHARACTERS)
     
     Returns:
         A secure random password
@@ -34,100 +41,49 @@ def generate_password(
     if length < 1:
         raise ValueError("Password length must be at least 1")
     
-    # Build character set based on options
-    characters = ""
-    
-    if use_uppercase:
-        characters += string.ascii_uppercase
-    if use_lowercase:
-        characters += string.ascii_lowercase
-    if use_digits:
-        characters += string.digits
-    if use_symbols:
-        characters += string.punctuation
-    
-    # Remove ambiguous characters if requested
-    if exclude_ambiguous:
-        ambiguous = "0O1lI|`"
-        characters = "".join(c for c in characters if c not in ambiguous)
+    # Build one character set per selected type
+    character_sets = _character_sets(
+        use_uppercase, use_lowercase, use_digits, use_symbols, exclude_ambiguous
+    )
+    characters = "".join(character_sets)
     
     if not characters:
         raise ValueError("At least one character type must be selected")
     
-    # Generate password using secure random
-    # secrets.choice is cryptographically secure, unlike random.choice
-    password = ''.join(secrets.choice(characters) for _ in range(length))
-    
-    # Ensure password has at least one of each selected type (for passwords 4+ chars)
-    if length >= 4:
-        password = _ensure_character_types(
-            password, 
-            use_uppercase, 
-            use_lowercase, 
-            use_digits, 
-            use_symbols,
-            exclude_ambiguous
-        )
-    
-    return password
+    # Draw whole passwords until one contains every selected type. Unlike
+    # patching characters into a password afterwards, this keeps every valid
+    # password equally likely. secrets.choice is cryptographically secure.
+    while True:
+        password = ''.join(secrets.choice(characters) for _ in range(length))
+        if length < len(character_sets) or all(
+            any(c in char_set for c in password) for char_set in character_sets
+        ):
+            return password
 
 
-def _ensure_character_types(
-    password: str,
+def _character_sets(
     use_uppercase: bool,
     use_lowercase: bool,
     use_digits: bool,
     use_symbols: bool,
     exclude_ambiguous: bool
-) -> str:
-    """
-    Ensure password contains at least one of each selected character type.
-    This prevents passwords like "AAAAAAA" when all types are selected.
-    """
-    required_chars = []
+) -> List[str]:
+    """Return the character set of each selected type"""
+    selected = [
+        (use_uppercase, string.ascii_uppercase),
+        (use_lowercase, string.ascii_lowercase),
+        (use_digits, string.digits),
+        (use_symbols, string.punctuation),
+    ]
     
-    # Build list of required character sets
-    if use_uppercase:
-        chars = string.ascii_uppercase
+    character_sets = []
+    for enabled, chars in selected:
+        if not enabled:
+            continue
         if exclude_ambiguous:
-            chars = chars.replace('O', '').replace('I', '')
-        if chars and not any(c in password for c in chars):
-            required_chars.append(secrets.choice(chars))
-    
-    if use_lowercase:
-        chars = string.ascii_lowercase
-        if exclude_ambiguous:
-            chars = chars.replace('o', '').replace('l', '').replace('i', '')
-        if chars and not any(c in password for c in chars):
-            required_chars.append(secrets.choice(chars))
-    
-    if use_digits:
-        chars = string.digits
-        if exclude_ambiguous:
-            chars = chars.replace('0', '').replace('1', '')
-        if chars and not any(c in password for c in chars):
-            required_chars.append(secrets.choice(chars))
-    
-    if use_symbols:
-        chars = string.punctuation
-        if exclude_ambiguous:
-            chars = chars.replace('|', '').replace('`', '')
-        if chars and not any(c in password for c in chars):
-            required_chars.append(secrets.choice(chars))
-    
-    # If we need to add required characters
-    if required_chars:
-        # Convert password to list for manipulation
-        password_list = list(password)
-        
-        # Replace random positions with required characters
-        for char in required_chars:
-            pos = secrets.randbelow(len(password_list))
-            password_list[pos] = char
-        
-        password = ''.join(password_list)
-    
-    return password
+            chars = "".join(c for c in chars if c not in AMBIGUOUS_CHARACTERS)
+        character_sets.append(chars)
+    return character_sets
 
 
 def generate_passphrase(

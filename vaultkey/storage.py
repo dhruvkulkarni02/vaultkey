@@ -3,7 +3,12 @@ storage.py - Handles all data storage operations
 This is the data core of VaultKey
 '''
 import os
-from typing import Optional
+import tempfile
+from typing import Optional, Tuple
+
+# File format written by this version: "VAULTKEY_V3:" followed by a crypto envelope.
+# V1 (no header) and V2 are VaultKey 1.0.x files, which are only read, for migration.
+CURRENT_VERSION = 3
 
 
 class Storage:
@@ -18,28 +23,45 @@ class Storage:
         """
         self.filename = filename
     
-    def save(self, encrypted_data: bytes, version: int = 2) -> None:
+    def save(self, encrypted_data: bytes, version: int = CURRENT_VERSION) -> None:
         """
-        Save encrypted data to file with secure permissions and version header.
-        
+        Atomically save encrypted data with a version header.
+
+        The data is written to a temporary file in the same directory (created
+        owner-only, 0600), flushed to disk, then renamed over the old file. A
+        crash at any point leaves either the old or the new file intact, never
+        a half-written one.
+
         Args:
             encrypted_data: The encrypted bytes to save
             version: Version number for future compatibility
         """
-        # Add version header for future compatibility
-        version_header = f"VAULTKEY_V{version}:".encode()
-        data_to_save = version_header + encrypted_data
-        
-        # Write the data to file
-        with open(self.filename, 'wb') as f:
-            f.write(data_to_save)
-        
-        # Set restrictive file permissions (Unix/Linux/Mac only)
-        # This makes the file readable/writable by owner only (600)
-        if os.name == 'posix':  # Unix-like systems
-            os.chmod(self.filename, 0o600)
+        data_to_save = f"VAULTKEY_V{version}:".encode() + encrypted_data
+
+        directory = os.path.dirname(os.path.abspath(self.filename))
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+
+        fd, temp_path = tempfile.mkstemp(prefix=".vaultkey-", suffix=".tmp", dir=directory)
+        try:
+            with os.fdopen(fd, 'wb') as f:
+                f.write(data_to_save)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, self.filename)
+        except BaseException:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise
+
+        # Persist the rename itself (POSIX only; Windows can't open directories)
+        if os.name == 'posix':
+            dir_fd = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
     
-    def load(self) -> tuple:
+    def load(self) -> Tuple[int, bytes]:
         """
         Load encrypted data from file and return version info.
         
@@ -49,7 +71,7 @@ class Storage:
         """
         if not os.path.exists(self.filename):
             # Return empty data with current version for new vaults
-            return (2, b'')
+            return (CURRENT_VERSION, b'')
         
         with open(self.filename, 'rb') as f:
             data = f.read()
@@ -57,7 +79,7 @@ class Storage:
         # Check for version header
         if data.startswith(b'VAULTKEY_V'):
             try:
-                # Parse version from header like "VAULTKEY_V2:"
+                # Parse version from header like "VAULTKEY_V3:"
                 header_end = data.find(b':')
                 if header_end > 0:
                     version_str = data[10:header_end].decode()
@@ -108,29 +130,3 @@ class Storage:
             'permissions': oct(stat.st_mode)[-3:] if os.name == 'posix' else 'N/A'
         }
 
-
-# Example usage (for testing)
-if __name__ == "__main__":
-    # Create storage instance
-    storage = Storage("test_passwords.encrypted")
-    
-    # Test saving some data
-    test_data = b"This is some encrypted data (pretend it's encrypted!)"
-    storage.save(test_data)
-    print("✓ Saved test data")
-    
-    # Test loading it back
-    loaded_data = storage.load()
-    print(f"✓ Loaded {len(loaded_data)} bytes")
-    
-    # Verify it matches
-    assert test_data == loaded_data
-    print("✓ Data matches!")
-    
-    # Check file info
-    info = storage.get_file_info()
-    print(f"✓ File info: {info}")
-    
-    # Clean up test file
-    storage.delete()
-    print("✓ Test file cleaned up")
