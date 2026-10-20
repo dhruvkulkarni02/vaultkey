@@ -51,30 +51,28 @@ The latest update is a security and reliability overhaul:
 
 ## 📦 Installation
 
-### macOS and Linux: Homebrew (recommended)
-```bash
-brew install dhruvkulkarni02/vaultkey/vaultkey
-```
-
-Upgrade later with `brew upgrade vaultkey`.
-
-### Any platform: pip
+### macOS, Linux, Windows: pip (recommended)
 ```bash
 pip install "vaultkey-cli @ https://github.com/dhruvkulkarni02/vaultkey/releases/download/v2.0.0/vaultkey_cli-2.0.0-py3-none-any.whl"
 ```
 
-Or install from source:
+Or install the latest source:
 
 ```bash
 pip install git+https://github.com/dhruvkulkarni02/vaultkey.git
 ```
 
-Both need Python 3.9+, and install the `vaultkey` and `vk` commands. You can also run `python -m vaultkey`.
+Both need Python 3.9+, and install the `vaultkey` and `vk` commands. You can also run `python -m vaultkey`. On macOS, [pipx](https://pipx.pypa.io/) keeps VaultKey in its own environment: `pipx install` followed by the same URL.
 
 ### Windows: standalone executable
 Download `VaultKey-Windows.zip` from the [latest release](https://github.com/dhruvkulkarni02/vaultkey/releases/latest), unzip it and run `VaultKey.bat`. Python is not required. The executable isn't code-signed, so SmartScreen may ask you to confirm the first time (**More info → Run anyway**).
 
-A macOS executable (`VaultKey-Mac.zip`, Apple Silicon) is attached to each release too. Homebrew is the easier route on a Mac, because downloaded unsigned apps are blocked by Gatekeeper.
+### macOS: standalone executable (Apple Silicon)
+Download `VaultKey-Mac.zip` from the [latest release](https://github.com/dhruvkulkarni02/vaultkey/releases/latest) and unzip it. The app isn't signed by Apple, so macOS blocks it the first time. Either right-click `VaultKey.command` and choose **Open**, or clear the download flag in Terminal:
+
+```bash
+xattr -dr com.apple.quarantine ~/Downloads/VaultKey-Mac
+```
 
 ## 🚀 Quick Start
 
