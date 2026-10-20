@@ -5,6 +5,8 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  release:
+    types: [published]
   workflow_dispatch:
 
 jobs:
@@ -115,6 +117,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     
+    permissions:
+      contents: write  # needed to upload release assets
+    
     steps:
     - name: Download all artifacts
       uses: actions/download-artifact@v4
@@ -204,3 +209,14 @@ jobs:
           VaultKey-Windows.zip
           VaultKey-Mac.zip
         retention-days: 90
+    
+    - name: Attach packages to the release
+      if: github.event_name == 'release'
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: >-
+        gh release upload
+        '${{ github.event.release.tag_name }}'
+        VaultKey-Windows.zip VaultKey-Mac.zip
+        --clobber
+        --repo '${{ github.repository }}'

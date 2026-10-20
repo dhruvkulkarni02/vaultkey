@@ -1,6 +1,6 @@
 # VaultKey 🔐
 
-[![PyPI version](https://badge.fury.io/py/vaultkey-cli.svg)](https://badge.fury.io/py/vaultkey-cli)
+[![Latest release](https://img.shields.io/github/v/release/dhruvkulkarni02/vaultkey)](https://github.com/dhruvkulkarni02/vaultkey/releases/latest)
 [![Tests](https://github.com/dhruvkulkarni02/vaultkey/actions/workflows/tests.yml/badge.svg)](https://github.com/dhruvkulkarni02/vaultkey/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
@@ -51,19 +51,30 @@ The latest update is a security and reliability overhaul:
 
 ## 📦 Installation
 
-### From PyPI
+### macOS and Linux: Homebrew (recommended)
 ```bash
-pip install vaultkey-cli
+brew install dhruvkulkarni02/vaultkey/vaultkey
 ```
 
-### From Source
+Upgrade later with `brew upgrade vaultkey`.
+
+### Any platform: pip
 ```bash
-git clone https://github.com/dhruvkulkarni02/vaultkey.git
-cd vaultkey
-pip install .
+pip install "vaultkey-cli @ https://github.com/dhruvkulkarni02/vaultkey/releases/download/v2.0.0/vaultkey_cli-2.0.0-py3-none-any.whl"
 ```
 
-Both install the `vaultkey` and `vk` commands. You can also run `python -m vaultkey`.
+Or install from source:
+
+```bash
+pip install git+https://github.com/dhruvkulkarni02/vaultkey.git
+```
+
+Both need Python 3.9+, and install the `vaultkey` and `vk` commands. You can also run `python -m vaultkey`.
+
+### Windows: standalone executable
+Download `VaultKey-Windows.zip` from the [latest release](https://github.com/dhruvkulkarni02/vaultkey/releases/latest), unzip it and run `VaultKey.bat`. Python is not required. The executable isn't code-signed, so SmartScreen may ask you to confirm the first time (**More info → Run anyway**).
+
+A macOS executable (`VaultKey-Mac.zip`, Apple Silicon) is attached to each release too. Homebrew is the easier route on a Mac, because downloaded unsigned apps are blocked by Gatekeeper.
 
 ## 🚀 Quick Start
 
@@ -289,7 +300,7 @@ vaultkey/
 │   ├── breach.py          # Breach detection with HIBP
 │   └── portability.py     # Import/export
 ├── tests/                 # pytest suite
-├── .github/workflows/     # Tests, executable builds, PyPI publishing
+├── .github/workflows/     # Tests, executable builds, release packages
 ├── pyproject.toml
 ├── requirements.txt
 └── README.md

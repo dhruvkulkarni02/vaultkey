@@ -1,6 +1,6 @@
 include README.md
 include LICENSE
-include SECURITY_ENHANCEMENTS.md
+include SECURITY.md
 include requirements.txt
 include pyproject.toml
 recursive-include vaultkey *.py

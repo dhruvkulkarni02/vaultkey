@@ -10,7 +10,7 @@ Features:
 - Breach detection monitoring
 """
 
-__version__ = "1.0.1"
+__version__ = "2.0.0"
 __author__ = "Dhruv Kulkarni"
 __email__ = "kulkarnidhruv02@gmail.com"
 __license__ = "MIT"

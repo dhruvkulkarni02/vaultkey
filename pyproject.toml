@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=45", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "vaultkey-cli"
-version = "1.0.1"
+version = "2.0.0"
 description = "Local, offline CLI password manager with Argon2id key derivation and AES-256-GCM encryption"
 readme = "README.md"
 license = "MIT"
@@ -36,7 +36,6 @@ classifiers = [
     "Topic :: System :: Systems Administration",
     "Topic :: Utilities",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -47,7 +46,7 @@ classifiers = [
     "Operating System :: Microsoft :: Windows",
     "Operating System :: MacOS",
 ]
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 dependencies = [
     "cryptography>=41.0.0",
     "click>=8.0.0",
@@ -81,7 +80,7 @@ Homepage = "https://github.com/dhruvkulkarni02/vaultkey"
 Repository = "https://github.com/dhruvkulkarni02/vaultkey"
 Documentation = "https://github.com/dhruvkulkarni02/vaultkey#readme"
 "Bug Reports" = "https://github.com/dhruvkulkarni02/vaultkey/issues"
-"Security Policy" = "https://github.com/dhruvkulkarni02/vaultkey/blob/main/SECURITY_ENHANCEMENTS.md"
+"Security Policy" = "https://github.com/dhruvkulkarni02/vaultkey/blob/main/SECURITY.md"
 Changelog = "https://github.com/dhruvkulkarni02/vaultkey/releases"
 
 [tool.setuptools.packages.find]
@@ -94,7 +93,7 @@ vaultkey = ["*.py", "py.typed"]
 
 [tool.black]
 line-length = 88
-target-version = ['py38']
+target-version = ['py39']
 include = '\.pyi?$'
 extend-exclude = '''
 /(
@@ -114,7 +113,7 @@ python_functions = ["test_*"]
 addopts = "--cov=vaultkey --cov-report=html --cov-report=term-missing"
 
 [tool.mypy]
-python_version = "3.8"
+python_version = "3.9"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
