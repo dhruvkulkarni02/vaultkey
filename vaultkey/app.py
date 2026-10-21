@@ -37,17 +37,18 @@ DEFAULT_LOCK_MINUTES = 5
 REVEAL_SECONDS = 30
 _analyzer = PasswordStrength()
 
-_LOGO_LETTERS = [
-    ("╦  ╦", "╚╗╔╝", " ╚╝ "),  # V
-    ("┌─┐", "├─┤", "┴ ┴"),     # A
-    ("┬ ┬", "│ │", "└─┘"),     # U
-    ("┬  ", "│  ", "┴─┘"),     # L
-    ("┌┬┐", " │ ", " ┴ "),     # T
-    ("╦╔═", "╠╩╗", "╩ ╩"),     # K
-    ("┌─┐", "├┤ ", "└─┘"),     # E
-    ("┬ ┬", "└┬┘", " ┴ "),     # Y
+# Lines are padded to one width so centring keeps the letters aligned
+_LOGO_LINES = [
+    "██╗   ██╗ █████╗ ██╗   ██╗██╗  ████████╗██╗  ██╗███████╗██╗   ██╗",
+    "██║   ██║██╔══██╗██║   ██║██║  ╚══██╔══╝██║ ██╔╝██╔════╝╚██╗ ██╔╝",
+    "██║   ██║███████║██║   ██║██║     ██║   █████╔╝ █████╗   ╚████╔╝",
+    "╚██╗ ██╔╝██╔══██║██║   ██║██║     ██║   ██╔═██╗ ██╔══╝    ╚██╔╝",
+    " ╚████╔╝ ██║  ██║╚██████╔╝███████╗██║   ██║  ██╗███████╗   ██║",
+    "  ╚═══╝  ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝   ╚═╝  ╚═╝╚══════╝   ╚═╝",
 ]
-LOGO = "\n".join("".join(letter[row] for letter in _LOGO_LETTERS) for row in range(3))
+LOGO = "\n".join(line.ljust(max(map(len, _LOGO_LINES))) for line in _LOGO_LINES)
+# Narrow terminals get a plain wordmark instead
+SMALL_LOGO = "◆  V A U L T K E Y"
 
 
 # --- Vault analysis -------------------------------------------------------------
@@ -125,6 +126,11 @@ def password_feedback(password: str) -> Text:
     return strength_meter(_analyzer.analyze(password)["score"]) if password else Text("")
 
 
+def logo_for(terminal_width: int) -> str:
+    """The block-letter logo, or the plain wordmark when it wouldn't fit"""
+    return LOGO if terminal_width >= 80 else SMALL_LOGO
+
+
 def short_path(path: str, limit: int = 48) -> str:
     """Path with ~ for the home directory, shortened in the middle if long"""
     home = os.path.expanduser("~")
@@ -150,7 +156,7 @@ class UnlockScreen(Screen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="card"):
-            yield Static(LOGO, id="logo")
+            yield Static(logo_for(self.app.size.width), id="logo")
             yield Static(f"v{__version__}\n{short_path(self.app.pm.storage.filename)}", classes="subtitle",
                          markup=False)
             yield Input(password=True, placeholder="Master password", id="password")
@@ -198,7 +204,7 @@ class CreateVaultScreen(Screen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="card"):
-            yield Static(LOGO, id="logo")
+            yield Static(logo_for(self.app.size.width), id="logo")
             yield Static("Welcome! Choose a master password for your new vault.", classes="subtitle")
             yield Input(password=True, placeholder="Master password", id="password")
             yield Static(id="strength")
@@ -1179,7 +1185,7 @@ class VaultKeyApp(App):
 
     /* Unlock and create */
     UnlockScreen, CreateVaultScreen { align: center middle; }
-    #card { width: 64; height: auto; padding: 1 3; border: round $accent 60%; background: $surface; }
+    #card { width: 76; max-width: 100%; height: auto; padding: 1 3; border: round $accent 60%; background: $surface; }
     #card Input, #card Button { margin-top: 1; width: 100%; }
     #logo { color: $accent; text-align: center; width: 100%; text-style: bold; }
     .subtitle { color: $text-muted; text-align: center; width: 100%; margin-top: 1; }
