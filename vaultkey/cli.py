@@ -2,23 +2,36 @@
 """
 VaultKey - Secure Password Manager CLI
 """
-import click
+import functools
 import getpass
-import sys
+import hashlib
 import os
-from typing import Optional
-from tabulate import tabulate
+import sys
 from datetime import datetime
-import time
+from typing import Dict, List, Optional
+
+import click
+from click.shell_completion import CompletionItem, get_completion_class
+from rich.table import Table
 
 from . import __author__, __version__
+from . import ui
+from .breach import BreachChecker
 from .clipboard import copy_with_autoclear, run_clearer
 from .errors import VaultError
-from .manager import PasswordManager, default_vault_path
 from .generator import generate_password
-from .strength import PasswordStrength, format_strength_bar
-from .breach import BreachChecker
-from .portability import VaultImporter, VaultExporter
+from .manager import PasswordManager, default_vault_path
+from .portability import VaultExporter, VaultImporter
+from .session import (
+    DEFAULT_TIMEOUT_MINUTES,
+    SESSION_ENV,
+    end_session,
+    resume_session,
+    session_expiry,
+    start_session,
+)
+from .strength import PasswordStrength
+from .ui import user
 
 # Initialize password manager with default vault file
 DEFAULT_VAULT = default_vault_path()
@@ -29,41 +42,127 @@ def get_password_manager() -> PasswordManager:
     """Get or create password manager instance"""
     global pm
     if pm is None:
-        # Create directory if it doesn't exist
-        vault_dir = os.path.dirname(DEFAULT_VAULT)
-        if not os.path.exists(vault_dir):
-            os.makedirs(vault_dir, mode=0o700)  # Secure directory
         pm = PasswordManager(DEFAULT_VAULT)
     return pm
 
 
+# --- Unlocking ---------------------------------------------------------------
+
 def prompt_master_password(confirm: bool = False) -> Optional[str]:
     """Prompt for master password with optional confirmation"""
     password = getpass.getpass("Master password: ")
-    
+
     if confirm:
         confirm_password = getpass.getpass("Confirm master password: ")
         if password != confirm_password:
-            click.echo("❌ Passwords don't match!", err=True)
+            ui.error("Passwords don't match")
             return None
-    
+
     return password
 
 
-def unlock_vault(pm: PasswordManager) -> str:
+def prompt_new_master_password() -> Optional[str]:
+    """Prompt for a new master password, warning about weak ones"""
+    password = prompt_master_password(confirm=True)
+    if password is None:
+        return None
+    if not password:
+        ui.error("The master password must not be empty")
+        return None
+
+    score = PasswordStrength().analyze(password)['score']
+    if len(password) < 12 or score < 60:
+        ui.warning("This master password is weak. Anyone who copies your vault file can try to guess it offline.")
+        ui.info("A long passphrase of several random words is strong and easy to remember.")
+        if not click.confirm("Use it anyway?", default=False, err=True):
+            return None
+    return password
+
+
+def unlock_with_password(pm: PasswordManager) -> str:
     """Prompt for the master password and unlock the vault, or exit with an error.
-    
+
     Returns:
         The master password
     """
     password = prompt_master_password()
     try:
         if password and pm.unlock(password):
+            if pm.migrated_from_version:
+                ui.success("Your vault was upgraded to the new format.")
+                ui.warning("If old copies of the vault file may exist, change your master password with 'vk passwd'.")
             return password
-        click.echo("❌ Invalid master password!", err=True)
+        ui.error("Invalid master password!")
     except VaultError as e:
-        click.echo(f"❌ {e}", err=True)
+        ui.error(str(e))
     sys.exit(1)
+
+
+def open_vault(pm: PasswordManager) -> Optional[str]:
+    """Unlock the vault with the active `vk unlock` session, or by prompting.
+
+    Returns:
+        The master password if it was prompted for, None if a session was used
+    """
+    if not pm.storage.exists():
+        ui.fail(f"No vault found at {user(pm.storage.filename)}. Create one with 'vk init'.")
+
+    crypto = resume_session(pm.storage.filename)
+    if crypto is not None and pm.unlock_with_crypto(crypto):
+        return None
+    return unlock_with_password(pm)
+
+
+def with_vault(command):
+    """Run a command with the vault unlocked, passing the manager as `pm`, and lock it afterwards"""
+    @functools.wraps(command)
+    def wrapper(*args, **kwargs):
+        manager = get_password_manager()
+        open_vault(manager)
+        try:
+            return command(manager, *args, **kwargs)
+        except (VaultError, ValueError, OSError) as e:
+            ui.fail(user(str(e)))
+        finally:
+            manager.lock()
+    return wrapper
+
+
+def resolve_site(pm: PasswordManager, query: str) -> str:
+    """Find the entry the user means: an exact name, or the only partial match.
+    Exits with an error when there is no match or several."""
+    if pm.get_password(query):
+        return query
+
+    matches = pm.search_sites(query)
+    if len(matches) == 1:
+        ui.info(f"Using [bold]{user(matches[0])}[/]")
+        return matches[0]
+    if not matches:
+        ui.fail(f"No entry matches '{user(query)}'")
+
+    ui.error(f"'{user(query)}' matches {len(matches)} entries:")
+    for match in matches[:10]:
+        ui.err_console.print(f"    {user(match)}")
+    if len(matches) > 10:
+        ui.err_console.print(f"    … and {len(matches) - 10} more")
+    ui.fail("Use the full name of the entry")
+
+
+def complete_site(ctx, param, incomplete: str) -> List[CompletionItem]:
+    """Shell completion for entry names. Only works while a `vk unlock` session is active."""
+    try:
+        manager = PasswordManager(DEFAULT_VAULT)
+        crypto = resume_session(manager.storage.filename)
+        if crypto is None or not manager.unlock_with_crypto(crypto):
+            return []
+        try:
+            return [CompletionItem(site) for site in manager.list_sites()
+                    if site.lower().startswith(incomplete.lower())]
+        finally:
+            manager.lock()
+    except Exception:
+        return []
 
 
 def secure_clipboard_copy(password: str, timeout: int = 30) -> bool:
@@ -75,1944 +174,849 @@ def secure_clipboard_copy(password: str, timeout: int = 30) -> bool:
         return False
 
 
-@click.group()
+def copy_or_warn(text: str, what: str, timeout: int = 30) -> None:
+    if secure_clipboard_copy(text, timeout):
+        clears = f", clears in {timeout}s" if timeout > 0 else ""
+        ui.success(f"{what} copied to clipboard{clears}")
+    else:
+        ui.fail("Clipboard not available. Install 'pyperclip' (and xclip or wl-clipboard on Linux).")
+
+
+def describe_entry(site: str, entry: dict, show_password: bool) -> Table:
+    """Key/value view of one entry"""
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="dim")
+    grid.add_column()
+    grid.add_row("Site", f"[bold]{user(site)}[/]")
+    grid.add_row("Username", f"[cyan]{user(entry.get('username', ''))}[/]")
+    grid.add_row("Password", f"[yellow]{user(entry['password'])}[/]" if show_password
+                 else f"{ui.MASK} [dim](--show to display, --copy to copy)[/]")
+    if entry.get("notes"):
+        grid.add_row("Notes", user(entry["notes"]))
+    for field in ("created", "modified"):
+        if entry.get(field):
+            grid.add_row(field.capitalize(), f"{entry[field][:10]} [dim]({ui.format_age(ui.age_in_days(entry[field]))})[/]")
+    if entry.get("history"):
+        grid.add_row("History", f"{len(entry['history'])} previous password(s) [dim](vk history)[/]")
+    return grid
+
+
+SITE_ARGUMENT = functools.partial(click.argument, 'site', shell_complete=complete_site)
+
+
+# --- Commands ----------------------------------------------------------------
+
+@click.group(context_settings={"help_option_names": ["-h", "--help"]})
 @click.version_option(version=__version__, prog_name="VaultKey")
 def cli():
-    """VaultKey - A secure password manager
-    
-    Local password manager with Argon2id key derivation and AES-256-GCM encryption.
-    Your passwords are encrypted locally and never leave your device.
-    Your master password is never stored anywhere.
+    """VaultKey - a local, offline password manager
+
+    Argon2id key derivation and AES-256-GCM encryption. Your passwords are
+    encrypted locally and never leave your device. Run 'vk unlock' to stay
+    unlocked between commands, or 'vk interactive' for a menu-driven interface.
     """
     pass
 
 
 @cli.command()
 def init():
-    """Initialize a new password vault"""
+    """Create a new password vault"""
     pm = get_password_manager()
-    
-    # Check if vault already exists
+
     if pm.storage.exists():
-        click.echo("⚠️  Vault already exists!")
-        if not click.confirm("Do you want to delete it and create a new one?"):
+        ui.warning(f"A vault already exists at {user(pm.storage.filename)}")
+        if not click.confirm("Delete it and create a new, empty vault? This cannot be undone", default=False, err=True):
             return
-        
+
         # Delete existing vault (and the salt file VaultKey 1.0 kept beside it)
         pm.storage.delete()
+        end_session(pm.storage.filename)
         if os.path.exists(pm.legacy_salt_file):
             os.remove(pm.legacy_salt_file)
-    
-    click.echo("🔐 Creating a new password vault...\n")
-    click.echo("Choose a strong master password.")
-    click.echo("This password protects all your other passwords.")
-    click.echo("Make it long and unique!\n")
-    
-    # Get master password
-    password = prompt_master_password(confirm=True)
+
+    ui.info("Choose a master password. It protects every entry and [bold]cannot be recovered[/] if you forget it.")
+    password = prompt_new_master_password()
     if not password:
-        return
-    
+        sys.exit(1)
+
     try:
         pm.create_vault(password)
-        click.echo("\n✅ Password vault created successfully!")
-        click.echo(f"📁 Location: {DEFAULT_VAULT}")
-        click.echo("\nYou can now start adding passwords with 'vaultkey add'")
-    except Exception as e:
-        click.echo(f"❌ Error creating vault: {e}", err=True)
-        sys.exit(1)
-
-
-@cli.command()
-def passwd():
-    """Change the master password"""
-    pm = get_password_manager()
-    current = unlock_vault(pm)
-    
-    try:
-        click.echo("\n🔐 Choose a new master password.")
-        new_password = prompt_master_password(confirm=True)
-        if not new_password:
-            sys.exit(1)
-        
-        pm.change_master_password(current, new_password)
-        click.echo("✅ Master password changed!")
-        click.echo("   Existing backups keep the password they were created with.")
-    except Exception as e:
-        click.echo(f"❌ Error changing master password: {e}", err=True)
-        sys.exit(1)
-    finally:
-        pm.lock()
+    except (VaultError, ValueError, OSError) as e:
+        ui.fail(f"Could not create the vault: {user(e)}")
+    ui.success(f"Vault created at {user(pm.storage.filename)}")
+    ui.info("Add your first password with 'vk add', or try 'vk interactive'.")
 
 
 @cli.command()
 @click.option('--site', '-s', prompt="Site/Service", help='Website or service name')
 @click.option('--username', '-u', prompt="Username", help='Username or email')
 @click.option('--generate', '-g', is_flag=True, help='Generate a secure password')
-@click.option('--length', '-l', default=16, help='Generated password length')
+@click.option('--length', '-l', default=16, type=click.IntRange(4, 256), help='Generated password length')
 @click.option('--no-symbols', is_flag=True, help='Exclude symbols from generated password')
 @click.option('--notes', '-n', help='Optional notes about this account')
-def add(site, username, generate, length, no_symbols, notes):
+@click.option('--copy', '-c', is_flag=True, help='Copy the password to the clipboard after saving')
+@with_vault
+def add(pm, site, username, generate, length, no_symbols, notes, copy):
     """Add a new password to the vault"""
-    pm = get_password_manager()
-    
-    # Unlock vault
-    unlock_vault(pm)
-    
-    try:
-        # Get or generate password
-        if generate:
-            password = generate_password(length, use_symbols=not no_symbols)
-            click.echo(f"\n🎲 Generated password: {click.style(password, fg='green', bold=True)}")
-            if click.confirm("\nSave this password?"):
-                pm.add_password(site, username, password, notes)
-                click.echo(f"✅ Password for {site} saved!")
-            else:
-                click.echo("❌ Password not saved.")
-        else:
-            password = getpass.getpass("Password: ")
-            confirm = getpass.getpass("Confirm password: ")
-            
-            if password != confirm:
-                click.echo("❌ Passwords don't match!", err=True)
-                return
-            
-            pm.add_password(site, username, password, notes)
-            click.echo(f"✅ Password for {site} saved!")
-            
-    except Exception as e:
-        click.echo(f"❌ Error: {e}", err=True)
-        sys.exit(1)
-    finally:
-        pm.lock()
+    if pm.get_password(site):
+        ui.warning(f"An entry for {user(site)} already exists; its current password will move to its history.")
+        if not click.confirm("Replace it?", default=False, err=True):
+            return
+
+    if generate:
+        password = generate_password(length, use_symbols=not no_symbols)
+        ui.console.print(f"Generated password: [bold green]{user(password)}[/]")
+        if not click.confirm("Save this password?", default=True, err=True):
+            ui.info("Not saved.")
+            return
+    else:
+        password = getpass.getpass("Password: ")
+        if not password:
+            ui.fail("The password must not be empty")
+        if getpass.getpass("Confirm password: ") != password:
+            ui.fail("Passwords don't match")
+
+    pm.add_password(site, username, password, notes)
+    ui.success(f"Saved [bold]{user(site)}[/]")
+    if copy:
+        copy_or_warn(password, "Password")
 
 
 @cli.command()
-@click.option('--site', '-s', required=True, help='Website or service name')
+@click.option('--site', '-s', required=True, shell_complete=complete_site, help='Website or service name')
 @click.option('--show', '-S', is_flag=True, help='Show password in plain text')
 @click.option('--copy', '-c', is_flag=True, help='Copy password to clipboard')
-def get(site, show, copy):
+@click.option('--json', 'as_json', is_flag=True, help='Print the entry, including its password, as JSON')
+@with_vault
+def get(pm, site, show, copy, as_json):
     """Retrieve a password from the vault"""
-    pm = get_password_manager()
-    
-    # Unlock vault
-    unlock_vault(pm)
-    
-    try:
-        # Search for exact match first
-        creds = pm.get_password(site)
-        
-        # If not found, search for partial matches
-        if not creds:
-            matches = pm.search_sites(site)
-            if matches:
-                click.echo(f"No exact match for '{site}'. Did you mean:")
-                for match in matches[:5]:  # Show max 5 matches
-                    click.echo(f"  • {match}")
-                
-                if len(matches) == 1 and click.confirm(f"\nRetrieve password for {matches[0]}?"):
-                    site = matches[0]
-                    creds = pm.get_password(site)
-                else:
-                    return
-            else:
-                click.echo(f"❌ No password found for '{site}'", err=True)
-                return
-        
-        # Display credentials
-        click.echo(f"\n🔐 Credentials for {click.style(site, bold=True)}")
-        click.echo(f"👤 Username: {click.style(creds['username'], fg='cyan')}")
-        
-        if show:
-            click.echo(f"🔑 Password: {click.style(creds['password'], fg='yellow')}")
-        else:
-            click.echo(f"🔑 Password: {'*' * len(creds['password'])} (use --show to display)")
-        
-        if creds.get('notes'):
-            click.echo(f"📝 Notes: {creds['notes']}")
-        
-        if creds.get('modified'):
-            click.echo(f"📅 Last modified: {creds['modified'][:10]}")
-        
-        # Copy to clipboard if requested
-        if copy:
-            if secure_clipboard_copy(creds['password'], 30):
-                click.echo("\n✅ Password copied to clipboard! (Auto-clear in 30 seconds)")
-            else:
-                click.echo("\n⚠️  Install 'pyperclip' to enable clipboard support", err=True)
-                
-    except Exception as e:
-        click.echo(f"❌ Error: {e}", err=True)
-        sys.exit(1)
-    finally:
-        pm.lock()
+    site = resolve_site(pm, site)
+    entry = pm.get_password(site)
+
+    if as_json:
+        ui.print_json(ui.entry_json(site, entry, include_password=True))
+    else:
+        ui.console.print(describe_entry(site, entry, show))
+
+    if copy:
+        copy_or_warn(entry['password'], "Password")
 
 
-@cli.command()
-@click.option('--filter', '-f', help='Filter sites by search term')
-@click.option('--verbose', '-v', is_flag=True, help='Show more details')
-@click.option('--sort', '-s', type=click.Choice(['site', 'username', 'modified', 'strength']), 
+@cli.command('list')
+@click.option('--filter', '-f', 'filter_text', help='Filter sites by search term')
+@click.option('--verbose', '-v', is_flag=True, help='Show created date and notes')
+@click.option('--sort', '-s', type=click.Choice(['site', 'username', 'modified', 'strength']),
               default='site', help='Sort by column')
 @click.option('--weak-only', '-w', is_flag=True, help='Show only weak passwords')
-def list(filter, verbose, sort, weak_only):
+@click.option('--json', 'as_json', is_flag=True, help='Print entries (without passwords) as JSON')
+@with_vault
+def list_entries(pm, filter_text, verbose, sort, weak_only, as_json):
     """List all stored passwords in a table"""
-    pm = get_password_manager()
-    analyzer = PasswordStrength() if (weak_only or sort == 'strength') else None
-    
-    # Unlock vault
-    unlock_vault(pm)
-    
-    try:
-        # Get sites
-        if filter:
-            sites = pm.search_sites(filter)
-            click.echo(f"\n🔍 Sites matching '{filter}':")
-        else:
-            sites = pm.list_sites()
-            click.echo("\n📋 All stored passwords:")
-        
-        if not sites:
-            click.echo("  (No passwords stored)")
-            return
-        
-        # Prepare data for table
-        table_data = []
-        
-        for site in sites:
-            info = pm.get_password(site)
-            
-            # Calculate password strength if needed
-            strength_score = None
-            if analyzer:
-                analysis = analyzer.analyze(info['password'])
-                strength_score = analysis['score']
-                
-                # Skip if filtering for weak only
-                if weak_only and strength_score >= 40:
-                    continue
-            
-            # Calculate age
-            try:
-                modified = datetime.fromisoformat(info.get('modified', ''))
-                age_days = (datetime.now() - modified).days
-                if age_days == 0:
-                    age_str = "Today"
-                elif age_days == 1:
-                    age_str = "Yesterday"
-                elif age_days < 30:
-                    age_str = f"{age_days}d ago"
-                elif age_days < 365:
-                    age_str = f"{age_days // 30}mo ago"
-                else:
-                    age_str = f"{age_days // 365}y ago"
-                sort_age = age_days
-            except:
-                age_str = "Unknown"
-                sort_age = 9999
-            
-            # Prepare row data
-            row_data = {
-                'site': site,
-                'username': info['username'],
-                'modified': age_str,
-                'sort_age': sort_age,
-                'password_length': len(info['password'])
-            }
-            
-            if analyzer:
-                row_data['strength'] = strength_score
-            
-            if verbose:
-                row_data['notes'] = info.get('notes', '')[:40] + '...' if len(info.get('notes', '')) > 40 else info.get('notes', '')
-                row_data['created'] = info.get('created', '')[:10] if info.get('created') else 'Unknown'
-            
-            table_data.append(row_data)
-        
-        if not table_data:
-            if weak_only:
-                click.echo("  ✅ No weak passwords found!")
-            else:
-                click.echo("  (No passwords match criteria)")
-            return
-        
-        # Sort data
-        if sort == 'site':
-            table_data.sort(key=lambda x: x['site'].lower())
-        elif sort == 'username':
-            table_data.sort(key=lambda x: x['username'].lower())
-        elif sort == 'modified':
-            table_data.sort(key=lambda x: x['sort_age'])
-        elif sort == 'strength' and analyzer:
-            table_data.sort(key=lambda x: x.get('strength', 0))
-        
-        # Prepare display table
-        headers = ['Site', 'Username', 'Length', 'Modified']
-        display_data = []
-        
-        if analyzer:
-            headers.insert(3, 'Strength')
-        
+    analyzer = PasswordStrength()
+    sites = pm.search_sites(filter_text) if filter_text else pm.list_sites()
+
+    rows = []
+    for site in sites:
+        entry = pm.get_password(site)
+        score = analyzer.analyze(entry['password'])['score']
+        if weak_only and score >= 60:
+            continue
+        rows.append((site, entry, score, ui.age_in_days(entry.get('modified'))))
+
+    sort_keys = {
+        'site': lambda r: r[0].lower(),
+        'username': lambda r: r[1].get('username', '').lower(),
+        'modified': lambda r: r[3] if r[3] is not None else 10 ** 6,
+        'strength': lambda r: r[2],
+    }
+    rows.sort(key=sort_keys[sort])
+
+    if as_json:
+        ui.print_json([dict(ui.entry_json(site, entry, False), strength=score) for site, entry, score, _ in rows])
+        return
+
+    if not rows:
+        ui.info("No weak passwords found." if weak_only else
+                "No entries match." if filter_text else "Your vault is empty. Add an entry with 'vk add'.")
+        return
+
+    table = ui.new_table("Site", "Username", "Strength", "Modified")
+    if verbose:
+        table.add_column("Created")
+        table.add_column("Notes", max_width=40, overflow="ellipsis")
+    for site, entry, score, age in rows:
+        row = [f"[bold]{user(site)}[/]", user(entry.get('username', '')), ui.strength_text(score), ui.format_age(age)]
         if verbose:
-            headers.extend(['Created', 'Notes'])
-        
-        for row in table_data:
-            # Truncate long URLs for better table formatting
-            site = row['site']
-            if len(site) > 50:
-                site = site[:47] + "..."
-            
-            display_row = [
-                site,
-                row['username'],
-                str(row['password_length']),
-                row['modified']
-            ]
-            
-            if analyzer:
-                # Create strength bar
-                score = row.get('strength', 0)
-                if score >= 80:
-                    strength_bar = click.style('████████', fg='green')
-                elif score >= 60:
-                    strength_bar = click.style('██████', fg='yellow')
-                elif score >= 40:
-                    strength_bar = click.style('████', fg='yellow')
-                else:
-                    strength_bar = click.style('██', fg='red')
-                display_row.insert(3, strength_bar)
-            
-            if verbose:
-                display_row.extend([
-                    row.get('created', 'Unknown'),
-                    row.get('notes', '')
-                ])
-            
-            display_data.append(display_row)
-        
-        # Display table
-        click.echo()
-        click.echo(tabulate(display_data, headers=headers, tablefmt='simple_grid'))
-        
-        # Summary
-        click.echo(f"\n📊 Total: {len(table_data)} password(s)")
-        
-        if analyzer and not weak_only:
-            weak_count = sum(1 for r in table_data if r.get('strength', 100) < 40)
-            if weak_count > 0:
-                click.echo(f"⚠️  {weak_count} weak password(s) - run 'vk list --weak-only' to see them")
-        
-    except Exception as e:
-        click.echo(f"❌ Error: {e}", err=True)
-        sys.exit(1)
-    finally:
-        pm.lock()
+            row += [entry.get('created', '')[:10], user(entry.get('notes', ''))]
+        table.add_row(*row)
+    ui.console.print(table)
 
-
-@cli.command()
-@click.argument('site')
-@click.option('--force', '-f', is_flag=True, help='Skip confirmation prompt')
-def delete(site, force):
-    """Delete a password from the vault
-    
-    Example:
-        vk delete github
-        vk delete github -f    # Skip confirmation
-    """
-    pm = get_password_manager()
-    
-    # Unlock vault
-    unlock_vault(pm)
-    
-    try:
-        # Check if site exists
-        if not pm.get_password(site):
-            click.echo(f"❌ No password found for '{site}'", err=True)
-            return
-        
-        # Confirm deletion
-        click.echo(f"⚠️  About to delete password for: {site}")
-        if force or click.confirm("Are you sure?"):
-            if pm.delete_password(site):
-                click.echo(f"✅ Password for {site} deleted")
-            else:
-                click.echo("❌ Failed to delete password", err=True)
-        else:
-            click.echo("❌ Deletion cancelled")
-            
-    except Exception as e:
-        click.echo(f"❌ Error: {e}", err=True)
-        sys.exit(1)
-    finally:
-        pm.lock()
+    weak = sum(1 for r in rows if r[2] < 60)
+    summary = f"{len(rows)} entr{'y' if len(rows) == 1 else 'ies'}"
+    if weak and not weak_only:
+        summary += f" · [yellow]{weak} weak[/] (vk list --weak-only)"
+    ui.err_console.print(summary)
 
 
 @cli.command()
 @click.argument('query', required=False, default='')
-@click.option('--type', '-t', type=click.Choice(['all', 'weak', 'strong', 'old', 'recent']), 
+@click.option('--type', '-t', 'kind', type=click.Choice(['all', 'weak', 'strong', 'old', 'recent']),
               default='all', help='Filter by type')
 @click.option('--show-passwords', '-p', is_flag=True, help='Show passwords in results')
-def search(query, type, show_passwords):
+@click.option('--json', 'as_json', is_flag=True, help='Print results as JSON')
+@with_vault
+def search(pm, query, kind, show_passwords, as_json):
     """Search passwords by site, username, or notes
-    
+
     Without QUERY, every entry is searched, e.g. 'vk search --type weak'.
     """
-    pm = get_password_manager()
     analyzer = PasswordStrength()
-    
-    # Unlock vault
-    unlock_vault(pm)
-    
-    try:
-        query_lower = query.lower()
-        results = []
-        
-        # Search through all passwords
-        for site in pm.list_sites():
-            data = pm.get_password(site)
-            
-            # Check if query matches site, username, or notes
-            if (query_lower in site.lower() or 
-                query_lower in data.get('username', '').lower() or 
-                query_lower in data.get('notes', '').lower()):
-                
-                # Get password strength
-                analysis = analyzer.analyze(data['password'])
-                strength_score = analysis['score']
-                
-                # Calculate age
-                try:
-                    modified = datetime.fromisoformat(data.get('modified', ''))
-                    age_days = (datetime.now() - modified).days
-                    if age_days == 0:
-                        age_str = "Today"
-                    elif age_days == 1:
-                        age_str = "Yesterday"
-                    elif age_days < 30:
-                        age_str = f"{age_days} days ago"
-                    elif age_days < 365:
-                        age_str = f"{age_days // 30} months ago"
-                    else:
-                        age_str = f"{age_days // 365} years ago"
-                except:
-                    age_str = "Unknown"
-                    age_days = 9999
-                
-                # Apply type filter
-                if type == 'weak' and strength_score >= 60:
-                    continue
-                elif type == 'strong' and strength_score < 60:
-                    continue
-                elif type == 'old' and age_days < 90:
-                    continue
-                elif type == 'recent' and age_days > 30:
-                    continue
-                
-                # Add to results
-                result = {
-                    'site': site,
-                    'username': data.get('username', ''),
-                    'password': data['password'] if show_passwords else '•' * len(data['password']),
-                    'strength': strength_score,
-                    'modified': age_str,
-                    'notes': data.get('notes', '')[:30] + '...' if len(data.get('notes', '')) > 30 else data.get('notes', '')
-                }
-                results.append(result)
-        
-        if not results:
-            click.echo(f"No passwords found matching '{query}'" if query else "No passwords found")
-            return
-        
-        # Sort by relevance (exact matches first)
-        results.sort(key=lambda x: (
-            query_lower not in x['site'].lower(),  # Exact site matches first
-            x['site'].lower()
-        ))
-        
-        click.echo(f"\n🔍 Found {len(results)} password(s)" + (f" matching '{query}'" if query else ""))
-        
-        if type != 'all':
-            click.echo(f"   Filtered by: {type}")
-        
-        click.echo()
-        
-        # Prepare table data
-        headers = ['Site', 'Username', 'Strength', 'Modified']
+    needle = query.lower()
+    results = []
+
+    for site in pm.list_sites():
+        entry = pm.get_password(site)
+        haystack = (site, entry.get('username', ''), entry.get('notes', ''))
+        if not any(needle in field.lower() for field in haystack):
+            continue
+
+        score = analyzer.analyze(entry['password'])['score']
+        age = ui.age_in_days(entry.get('modified'))
+        if ((kind == 'weak' and score >= 60) or (kind == 'strong' and score < 60)
+                or (kind == 'old' and (age is None or age < ui.OLD_AFTER_DAYS))
+                or (kind == 'recent' and (age is None or age > 30))):
+            continue
+        results.append((site, entry, score, age))
+
+    # Entries whose name matches come first
+    results.sort(key=lambda r: (needle not in r[0].lower(), r[0].lower()))
+
+    if as_json:
+        ui.print_json([dict(ui.entry_json(site, entry, show_passwords), strength=score)
+                       for site, entry, score, _ in results])
+        return
+
+    if not results:
+        ui.info(f"Nothing matches '{user(query)}'" if query else "No entries match")
+        return
+
+    table = ui.new_table("Site", "Username", "Strength", "Modified")
+    if show_passwords:
+        table.add_column("Password")
+    for site, entry, score, age in results:
+        row = [f"[bold]{user(site)}[/]", user(entry.get('username', '')), ui.strength_text(score), ui.format_age(age)]
         if show_passwords:
-            headers.insert(2, 'Password')
-        if any(r['notes'] for r in results):
-            headers.append('Notes')
-        
-        table_data = []
-        for r in results:
-            # Create strength bar
-            score = r['strength']
-            if score >= 80:
-                strength_bar = click.style('████████', fg='green')
-            elif score >= 60:
-                strength_bar = click.style('██████', fg='yellow')
-            elif score >= 40:
-                strength_bar = click.style('████', fg='yellow')
-            else:
-                strength_bar = click.style('██', fg='red')
-            
-            row = [r['site'], r['username'], strength_bar, r['modified']]
-            if show_passwords:
-                row.insert(2, r['password'])
-            if any(res['notes'] for res in results):
-                row.append(r['notes'])
-            
-            table_data.append(row)
-        
-        # Display results in a table
-        click.echo(tabulate(table_data, headers=headers, tablefmt='simple_grid'))
-        
-        # Show summary
-        if len(results) > 1:
-            weak_count = sum(1 for r in results if r['strength'] < 40)
-            if weak_count > 0:
-                click.echo(f"\n⚠️  {weak_count} weak password(s) found - consider updating them")
-        
-    except Exception as e:
-        click.echo(f"❌ Error: {e}", err=True)
-        sys.exit(1)
-    finally:
-        pm.lock()
+            row.append(f"[yellow]{user(entry['password'])}[/]")
+        table.add_row(*row)
+    ui.console.print(table)
+    ui.err_console.print(f"{len(results)} result(s)" + (f" · filtered by {kind}" if kind != 'all' else ""))
 
 
 @cli.command()
-@click.argument('site')
-@click.option('--timeout', '-t', default=30, help='Clear clipboard after N seconds (0 = don\'t clear)')
-def cp(site, timeout):
+@SITE_ARGUMENT()
+@click.option('--timeout', '-t', default=30, type=click.IntRange(min=0), help="Clear clipboard after N seconds (0 = don't clear)")
+@click.option('--username', '-u', 'copy_username', is_flag=True, help='Copy the username instead of the password')
+@with_vault
+def cp(pm, site, timeout, copy_username):
     """Copy password to clipboard without displaying it"""
-    pm = get_password_manager()
-    
-    # Unlock vault
-    unlock_vault(pm)
-    
-    try:
-        # Try exact match first
-        creds = pm.get_password(site)
-        
-        # If not found, try fuzzy search
-        if not creds:
-            matches = pm.search_sites(site)
-            if not matches:
-                click.echo(f"❌ No password found for '{site}'", err=True)
-                return
-            
-            if len(matches) == 1:
-                site = matches[0]
-                creds = pm.get_password(site)
-                click.echo(f"Found: {site}")
-            else:
-                # Multiple matches - show them
-                click.echo(f"Multiple matches for '{site}':")
-                for i, match in enumerate(matches[:10], 1):
-                    click.echo(f"  {i}. {match}")
-                
-                if len(matches) > 10:
-                    click.echo(f"  ... and {len(matches) - 10} more")
-                
-                # Ask user to be more specific
-                click.echo("\nPlease use the exact site name")
-                return
-        
-        # Copy to clipboard
-        if secure_clipboard_copy(creds['password'], timeout):
-            click.echo(f"✅ Password for {click.style(site, bold=True)} copied to clipboard")
-            if timeout > 0:
-                click.echo(f"⏱️  Clipboard will auto-clear in {timeout} seconds...")
-        else:
-            click.echo("⚠️  Install 'pyperclip' to enable clipboard support", err=True)
-            click.echo("   Run: pip install pyperclip")
-            
-    except Exception as e:
-        click.echo(f"❌ Error: {e}", err=True)
-        sys.exit(1)
-    finally:
-        pm.lock()
+    site = resolve_site(pm, site)
+    entry = pm.get_password(site)
+    if copy_username:
+        copy_or_warn(entry.get('username', ''), f"Username for [bold]{user(site)}[/]", timeout)
+    else:
+        copy_or_warn(entry['password'], f"Password for [bold]{user(site)}[/]", timeout)
 
 
 @cli.command()
-@click.option('--length', '-l', default=16, type=int, help='Password length')
-@click.option('--count', '-c', default=1, type=int, help='Number of passwords to generate')
+@SITE_ARGUMENT()
+@click.option('--username', '-u', help='New username')
+@click.option('--password', '-p', 'change_password', is_flag=True, help='Enter a new password (prompted)')
+@click.option('--generate', '-g', is_flag=True, help='Generate a new password')
+@click.option('--length', '-l', default=16, type=click.IntRange(4, 256), help='Generated password length')
+@click.option('--notes', '-n', help='New notes')
+@with_vault
+def edit(pm, site, username, change_password, generate, length, notes):
+    """Change an entry's username, password or notes
+
+    Without options, you are asked for each field. The old password is kept in
+    the entry's history.
+
+    Examples:
+        vk edit github.com -g          # Generate a new password
+        vk edit github.com -u newname  # Change the username
+    """
+    site = resolve_site(pm, site)
+    entry = pm.get_password(site)
+    new_password = None
+
+    if username is None and notes is None and not change_password and not generate:
+        username = click.prompt("Username", default=entry.get('username', ''), err=True)
+        notes = click.prompt("Notes", default=entry.get('notes', ''), show_default=bool(entry.get('notes')), err=True)
+        change_password = click.confirm("Change the password?", default=False, err=True)
+        if change_password:
+            generate = click.confirm("Generate a new one?", default=True, err=True)
+            change_password = not generate
+
+    if change_password:
+        new_password = getpass.getpass("New password: ")
+        if not new_password:
+            ui.fail("The password must not be empty")
+        if getpass.getpass("Confirm new password: ") != new_password:
+            ui.fail("Passwords don't match")
+        if pm.check_password_reuse(site, new_password):
+            ui.warning("You have used this password for this entry before.")
+
+    pm.update_password(site, new_password=new_password, new_username=username, new_notes=notes,
+                       generate_new=generate, password_length=length)
+    if generate:
+        ui.console.print(f"New password: [bold green]{user(pm.get_password(site)['password'])}[/]")
+    ui.success(f"Updated [bold]{user(site)}[/]")
+
+
+@cli.command()
+@SITE_ARGUMENT()
+@click.argument('new_name')
+@with_vault
+def rename(pm, site, new_name):
+    """Rename an entry (its password and history are kept)"""
+    site = resolve_site(pm, site)
+    pm.rename_entry(site, new_name)
+    ui.success(f"Renamed [bold]{user(site)}[/] to [bold]{user(new_name)}[/]")
+
+
+@cli.command()
+@SITE_ARGUMENT()
+@click.option('--show', '-S', is_flag=True, help='Show the old passwords')
+@click.option('--clear', is_flag=True, help="Delete this entry's password history")
+@with_vault
+def history(pm, site, show, clear):
+    """Show an entry's previous passwords"""
+    site = resolve_site(pm, site)
+
+    if clear:
+        if click.confirm(f"Delete the password history of {site}?", default=False, err=True):
+            ui.success(f"Deleted {pm.clear_history(site)} old password(s)")
+        return
+
+    entries = pm.get_password_history(site)
+    if not entries:
+        ui.info(f"{user(site)} has no previous passwords")
+        return
+
+    table = ui.new_table("#", "Password", "In use from", "Replaced", title=f"Password history of {user(site)}")
+    for number, item in enumerate(reversed(entries), 1):
+        table.add_row(str(number), f"[yellow]{user(item['password'])}[/]" if show else ui.MASK,
+                      item.get('changed', '')[:10], item.get('retired', '')[:10])
+    ui.console.print(table)
+
+
+@cli.command()
+@SITE_ARGUMENT()
+@click.option('--force', '-f', is_flag=True, help='Skip confirmation prompt')
+@with_vault
+def delete(pm, site, force):
+    """Delete a password from the vault
+
+    Example:
+        vk delete github
+        vk delete github -f    # Skip confirmation
+    """
+    if not pm.get_password(site):
+        ui.fail(f"No entry named '{user(site)}'")
+
+    if force or click.confirm(f"Delete {site}? This cannot be undone", default=False, err=True):
+        pm.delete_password(site)
+        ui.success(f"Deleted [bold]{user(site)}[/]")
+    else:
+        ui.info("Nothing deleted")
+
+
+@cli.command()
+@click.option('--length', '-l', default=16, type=click.IntRange(1, 1024), help='Password length')
+@click.option('--count', '-c', default=1, type=click.IntRange(1, 1000), help='Number of passwords to generate')
 @click.option('--no-symbols', is_flag=True, help='Exclude symbols')
 @click.option('--no-digits', is_flag=True, help='Exclude numbers')
 @click.option('--no-uppercase', is_flag=True, help='Exclude uppercase letters')
-@click.option('--no-ambiguous', is_flag=True, help='Exclude ambiguous characters (0,O,l,1)')
-def generate(length, count, no_symbols, no_digits, no_uppercase, no_ambiguous):
+@click.option('--no-ambiguous', is_flag=True, help='Exclude look-alike characters (0 O 1 l I | `)')
+@click.option('--copy', '-C', is_flag=True, help='Copy the (first) password to the clipboard')
+@click.option('--json', 'as_json', is_flag=True, help='Print the passwords as a JSON list')
+def generate(length, count, no_symbols, no_digits, no_uppercase, no_ambiguous, copy, as_json):
     """Generate secure passwords without saving them"""
-    click.echo(f"\n🎲 Generating {count} password(s) of length {length}:\n")
-    
-    for i in range(count):
-        password = generate_password(
-            length=length,
-            use_symbols=not no_symbols,
-            use_digits=not no_digits,
-            use_uppercase=not no_uppercase,
-            exclude_ambiguous=no_ambiguous
-        )
-        
-        if count == 1:
-            click.echo(click.style(password, fg='green', bold=True))
-        else:
-            click.echo(f"{i+1}. {click.style(password, fg='green', bold=True)}")
-    
-    click.echo("\n💡 Tip: Use 'vaultkey add -g' to generate and save a password")
+    try:
+        passwords = [
+            generate_password(
+                length=length,
+                use_symbols=not no_symbols,
+                use_digits=not no_digits,
+                use_uppercase=not no_uppercase,
+                exclude_ambiguous=no_ambiguous
+            )
+            for _ in range(count)
+        ]
+    except ValueError as e:
+        ui.fail(str(e))
+
+    if as_json:
+        ui.print_json(passwords)
+    else:
+        for password in passwords:
+            ui.console.print(f"[bold green]{user(password)}[/]")
+
+    if copy:
+        copy_or_warn(passwords[0], "Password")
+
 
 @cli.command('import-passwords')
-@click.argument('file')
-@click.option('--format', '-f', type=click.Choice(['csv', 'json', 'lastpass', 'bitwarden', '1password', 'chrome', 'keepass']), 
+@click.argument('file', type=click.Path(exists=True, dir_okay=False))
+@click.option('--format', '-f', 'file_format',
+              type=click.Choice(['csv', 'json', 'lastpass', 'bitwarden', '1password', 'chrome', 'keepass']),
               default='csv', help='Import format')
-def import_passwords(file, format):
+@with_vault
+def import_passwords(pm, file, file_format):
     """Import passwords from file
-    
+
     Example:
         vk import-passwords ~/Downloads/passwords.csv --format csv
         vk import-passwords ~/Downloads/lastpass_export.csv --format lastpass
     """
-    pm = get_password_manager()
-    
-    if not os.path.exists(file):
-        click.echo(f"❌ File not found: {file}", err=True)
-        return
-    
-    # Unlock vault
-    unlock_vault(pm)
-    
-    try:
-        importer = VaultImporter()
-        
-        click.echo(f"Importing from {format} format...")
-        passwords = importer.import_file(file, format)
-        
-        imported, skipped = pm.import_entries(passwords)
-        for site in skipped:
-            click.echo(f"  Skipping {site} (already exists)")
-        imported_count, skipped_count = len(imported), len(skipped)
-        
-        click.echo(f"\n✅ Import complete!")
-        click.echo(f"   Imported: {imported_count} passwords")
-        if skipped_count > 0:
-            click.echo(f"   Skipped: {skipped_count} passwords")
-    
-    except Exception as e:
-        click.echo(f"❌ Import failed: {e}", err=True)
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
-    finally:
-        pm.lock()
+    passwords = VaultImporter().import_file(file, file_format)
+    imported, skipped = pm.import_entries(passwords)
+
+    ui.success(f"Imported {len(imported)} entr{'y' if len(imported) == 1 else 'ies'}")
+    if skipped:
+        ui.warning(f"Skipped {len(skipped)} that already exist: {user(', '.join(skipped[:10]))}"
+                   + (" …" if len(skipped) > 10 else ""))
 
 
 @cli.command('export-passwords')
-@click.option('--format', '-f', type=click.Choice(['csv', 'json']), default='csv', help='Export format')
+@click.option('--format', '-f', 'file_format', type=click.Choice(['csv', 'json']), default='csv', help='Export format')
 @click.option('--output', '-o', help='Output file path')
 @click.option('--include-passwords', is_flag=True, help='Include actual passwords (CAREFUL!)')
-def export_passwords(format, output, include_passwords):
+@with_vault
+def export_passwords(pm, file_format, output, include_passwords):
     """Export passwords to file
-    
+
     Example:
         vk export-passwords --format csv
         vk export-passwords --format json --output backup.json --include-passwords
     """
-    pm = get_password_manager()
-    
-    if not include_passwords:
-        click.echo("⚠️  WARNING: Exporting without passwords (use --include-passwords to include)")
-    
-    # Unlock vault
-    unlock_vault(pm)
-    
-    try:
-        exporter = VaultExporter()
-        
-        # Get all passwords
-        sites = pm.list_sites()
-        if not sites:
-            click.echo("No passwords to export")
-            return
-            
-        export_data = {}
-        
-        for site in sites:
-            password_data = pm.get_password(site)
-            if include_passwords:
-                export_data[site] = password_data
-            else:
-                export_data[site] = {
-                    'username': password_data.get('username', ''),
-                    'notes': password_data.get('notes', ''),
-                    'password': '***HIDDEN***',
-                    'created': password_data.get('created', ''),
-                    'modified': password_data.get('modified', '')
-                }
-        
-        # Determine output filename
-        if output:
-            filename = output
-        else:
-            # Default filename with timestamp
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"vaultkey_export_{timestamp}.{format}"
-        
-        # Export using the VaultExporter
-        exporter.export_passwords(export_data, format, filename)
-        
-        click.echo(f"✅ Exported {len(export_data)} passwords to {filename}")
-        
-        if not include_passwords:
-            click.echo("   (Passwords hidden - use --include-passwords to include them)")
-    
-    except Exception as e:
-        click.echo(f"❌ Export failed: {e}", err=True)
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
-    finally:
-        pm.lock()
+    sites = pm.list_sites()
+    if not sites:
+        ui.info("Nothing to export")
+        return
+
+    export_data = {}
+    for site in sites:
+        entry = pm.get_password(site)
+        export_data[site] = dict(entry) if include_passwords else {
+            'username': entry.get('username', ''),
+            'notes': entry.get('notes', ''),
+            'password': '***HIDDEN***',
+            'created': entry.get('created', ''),
+            'modified': entry.get('modified', '')
+        }
+
+    filename = output or f"vaultkey_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{file_format}"
+    VaultExporter().export_passwords(export_data, file_format, filename)
+
+    ui.success(f"Exported {len(export_data)} entries to {user(filename)}")
+    if include_passwords:
+        ui.warning("This file contains your passwords unencrypted. Delete it as soon as you're done.")
+    else:
+        ui.info("Passwords were left out; add --include-passwords to include them.")
 
 
 @cli.command()
 @click.option('--breaches', '-b', is_flag=True, help='Check passwords against known breaches')
-@click.option('--verbose', '-v', is_flag=True, help='Show detailed analysis for each password')
+@click.option('--verbose', '-v', is_flag=True, help='Show the reasons behind each weak score')
 @click.option('--weak-only', '-w', is_flag=True, help='Only show weak passwords (score < 60)')
 @click.option('--old-only', '-o', is_flag=True, help='Only show passwords older than 90 days')
-def audit(breaches, verbose, weak_only, old_only):
+@click.option('--json', 'as_json', is_flag=True, help='Print the results as JSON')
+@with_vault
+def audit(pm, breaches, verbose, weak_only, old_only, as_json):
     """Perform a comprehensive security audit of all passwords
-    
+
     Examples:
         vk audit                    # Basic strength audit
-        vk audit -v                 # Verbose output with details
         vk audit -b                 # Include breach checking
-        vk audit -b -v              # Full audit with breach checking
         vk audit -w                 # Only show weak passwords
-        vk audit -o                 # Only show old passwords
     """
-    pm = get_password_manager()
+    sites = pm.list_sites()
+    if not sites:
+        ui.info("No passwords to audit")
+        return
+
     analyzer = PasswordStrength()
-    
-    # Unlock vault
-    unlock_vault(pm)
-    
-    try:
-        sites = pm.list_sites()
-        if not sites:
-            click.echo("No passwords to audit")
-            return
-        
-        click.echo(f"\n🔍 Auditing {len(sites)} password(s)...")
-        if breaches:
-            click.echo("   Including breach checking (this may take a moment)")
-        click.echo()
-        
-        # Initialize counters
-        stats = {
-            'total': len(sites),
-            'strong': 0,
-            'weak': 0,
-            'very_weak': 0,
-            'breached': 0,
-            'breach_errors': 0,
-            'old': 0,
-            'duplicates': 0
-        }
-        
-        password_hashes = {}  # Track duplicate passwords
-        results = []
-        
-        # Initialize breach checker if needed
-        breach_checker = None
-        if breaches:
-            breach_checker = BreachChecker()
-        
-        # Analyze each password
-        for i, site in enumerate(sites, 1):
-            if not verbose:
-                click.echo(f"\rProgress: {i}/{len(sites)}", nl=False)
-            
-            data = pm.get_password(site)
-            password_text = data['password']
-            
-            # Analyze strength
-            analysis = analyzer.analyze(password_text)
-            score = analysis['score']
-            
-            # Check for duplicates
-            import hashlib
-            pwd_hash = hashlib.sha256(password_text.encode()).hexdigest()
-            if pwd_hash in password_hashes:
-                stats['duplicates'] += 1
-                is_duplicate = True
-                duplicate_site = password_hashes[pwd_hash]
-            else:
-                password_hashes[pwd_hash] = site
-                is_duplicate = False
-                duplicate_site = None
-            
-            # Calculate age
-            try:
-                modified = datetime.fromisoformat(data.get('modified', ''))
-                age_days = (datetime.now() - modified).days
-                is_old = age_days > 90
-                if is_old:
-                    stats['old'] += 1
-            except:
-                age_days = 0
-                is_old = False
-            
-            # Categorize by strength
-            if score >= 80:
-                stats['strong'] += 1
-                strength_category = 'Strong'
-                strength_emoji = '🟢'
-            elif score >= 60:
-                stats['strong'] += 1
-                strength_category = 'Good'
-                strength_emoji = '🟡'
-            elif score >= 40:
-                stats['weak'] += 1
-                strength_category = 'Weak'
-                strength_emoji = '🟠'
-            else:
-                stats['very_weak'] += 1
-                strength_category = 'Very Weak'
-                strength_emoji = '🔴'
-            
-            # Check breaches if requested
-            breach_info = None
-            is_breached = False
-            if breach_checker:
-                breach_result = breach_checker.check_password(password_text)
-                if breach_result['error']:
-                    stats['breach_errors'] += 1
-                is_breached = breach_result['count'] > 0
-                if is_breached:
-                    stats['breached'] += 1
-                    breach_info = breach_result
-            
-            # Apply filters
-            if weak_only and score >= 60:
-                continue
-            if old_only and not is_old:
-                continue
-            
-            # Store result for display
-            result = {
+    checker = BreachChecker() if breaches else None
+    sites_by_password: Dict[str, List[str]] = {}
+    results = []
+    breach_errors = 0
+
+    with ui.err_console.status("Auditing and checking breaches…" if breaches else "Auditing…"):
+        for site in sites:
+            entry = pm.get_password(site)
+            analysis = analyzer.analyze(entry['password'])
+            fingerprint = hashlib.sha256(entry['password'].encode()).hexdigest()
+            age = ui.age_in_days(entry.get('modified'))
+            breach_count = 0
+            if checker:
+                result = checker.check_password(entry['password'])
+                breach_errors += bool(result['error'])
+                breach_count = result['count']
+
+            results.append({
                 'site': site,
-                'username': data.get('username', ''),
-                'score': score,
-                'category': strength_category,
-                'emoji': strength_emoji,
-                'age_days': age_days,
-                'is_old': is_old,
-                'is_duplicate': is_duplicate,
-                'duplicate_site': duplicate_site,
-                'is_breached': is_breached,
-                'breach_info': breach_info,
-                'analysis': analysis,
-                'notes': data.get('notes', '')
-            }
-            results.append(result)
-        
-        if not verbose:
-            click.echo()  # New line after progress
-        
-        # Display results
-        if verbose and results:
-            click.echo("\n📊 Detailed Results:")
-            click.echo("=" * 60)
-            
-            for result in results:
-                click.echo(f"\n{result['emoji']} {click.style(result['site'], bold=True)}")
-                click.echo(f"   Username: {result['username']}")
-                click.echo(f"   Strength: {result['score']}/100 ({result['category']})")
-                
-                if result['age_days'] > 0:
-                    if result['age_days'] == 1:
-                        age_str = "1 day old"
-                    elif result['age_days'] < 30:
-                        age_str = f"{result['age_days']} days old"
-                    elif result['age_days'] < 365:
-                        age_str = f"{result['age_days'] // 30} months old"
-                    else:
-                        age_str = f"{result['age_days'] // 365} years old"
-                    click.echo(f"   Age: {age_str}")
-                    
-                    if result['is_old']:
-                        click.echo(f"   ⚠️  Password is old (>90 days)")
-                
-                if result['is_duplicate']:
-                    click.echo(f"   ⚠️  Duplicate password (same as {result['duplicate_site']})")
-                
-                if result['is_breached']:
-                    count = result['breach_info']['count']
-                    click.echo(f"   🚨 BREACHED: Found in {count:,} breaches!")
-                
-                if result['notes']:
-                    click.echo(f"   Notes: {result['notes'][:50]}...")
-                
-                # Show improvement suggestions for weak passwords
-                if result['score'] < 60:
-                    feedback = result['analysis']['feedback']
-                    click.echo(f"   💡 Suggestion: {feedback}")
-        
-        elif results:
-            # Table view for non-verbose
-            headers = ['Site', 'Username', 'Strength', 'Age', 'Issues']
-            table_data = []
-            
-            for result in results:
-                # Age display
-                if result['age_days'] == 0:
-                    age_str = "Today"
-                elif result['age_days'] == 1:
-                    age_str = "1 day"
-                elif result['age_days'] < 30:
-                    age_str = f"{result['age_days']}d"
-                elif result['age_days'] < 365:
-                    age_str = f"{result['age_days'] // 30}mo"
-                else:
-                    age_str = f"{result['age_days'] // 365}yr"
-                
-                # Issues column
-                issues = []
-                if result['is_old']:
-                    issues.append("Old")
-                if result['is_duplicate']:
-                    issues.append("Duplicate")
-                if result['is_breached']:
-                    issues.append("BREACHED")
-                if result['score'] < 40:
-                    issues.append("Very Weak")
-                elif result['score'] < 60:
-                    issues.append("Weak")
-                
-                issues_str = ", ".join(issues) if issues else "None"
-                
-                # Strength display with emoji
-                strength_display = f"{result['emoji']} {result['score']}"
-                
-                table_data.append([
-                    result['site'][:20],
-                    result['username'][:15],
-                    strength_display,
-                    age_str,
-                    issues_str[:20]
-                ])
-            
-            click.echo(tabulate(table_data, headers=headers, tablefmt='simple_grid'))
-        
-        # Summary statistics
-        click.echo(f"\n📈 Audit Summary:")
-        click.echo("=" * 30)
-        click.echo(f"Total passwords: {stats['total']}")
-        click.echo(f"Strong/Good passwords: {stats['strong']} ({stats['strong']/stats['total']*100:.1f}%)")
-        click.echo(f"Weak passwords: {stats['weak']} ({stats['weak']/stats['total']*100:.1f}%)")
-        click.echo(f"Very weak passwords: {stats['very_weak']} ({stats['very_weak']/stats['total']*100:.1f}%)")
-        
-        if stats['old'] > 0:
-            click.echo(f"Old passwords (>90 days): {stats['old']} ({stats['old']/stats['total']*100:.1f}%)")
-        
-        if stats['duplicates'] > 0:
-            click.echo(f"Duplicate passwords: {stats['duplicates']} ({stats['duplicates']/stats['total']*100:.1f}%)")
-        
-        if breaches and stats['breached'] > 0:
-            click.echo(f"🚨 Breached passwords: {stats['breached']} ({stats['breached']/stats['total']*100:.1f}%)")
-        
-        if stats['breach_errors'] > 0:
-            click.echo(f"❌ Breach check failed for {stats['breach_errors']} password(s) - check your internet connection")
-        
-        # Recommendations
-        click.echo(f"\n💡 Recommendations:")
-        recommendations = []
-        
-        if stats['very_weak'] > 0:
-            recommendations.append(f"• Update {stats['very_weak']} very weak password(s)")
-        if stats['weak'] > 0:
-            recommendations.append(f"• Consider updating {stats['weak']} weak password(s)")
-        if stats['old'] > 0:
-            recommendations.append(f"• Update {stats['old']} old password(s)")
-        if stats['duplicates'] > 0:
-            recommendations.append(f"• Change {stats['duplicates']} duplicate password(s)")
-        if breaches and stats['breached'] > 0:
-            recommendations.append(f"• URGENT: Change {stats['breached']} breached password(s)")
-        if stats['breach_errors'] > 0:
-            recommendations.append(f"• Re-run the breach check for {stats['breach_errors']} password(s) that could not be checked")
-        
-        if recommendations:
-            for rec in recommendations:
-                click.echo(rec)
-        else:
-            click.echo("• Your passwords look good! 🎉")
-        
-        # Overall security score
-        security_score = (stats['strong'] / stats['total']) * 100
-        if stats['breached'] > 0:
-            security_score -= 30  # Heavy penalty for breached passwords
-        if stats['duplicates'] > 0:
-            security_score -= 10  # Penalty for duplicates
-        
-        security_score = max(0, security_score)  # Don't go below 0
-        
-        click.echo(f"\n🎯 Overall Security Score: {security_score:.1f}/100")
-        
-        if security_score >= 90:
-            click.echo("   Excellent security! 🏆")
-        elif security_score >= 75:
-            click.echo("   Good security 👍")
-        elif security_score >= 50:
-            click.echo("   Fair security - room for improvement")
-        else:
-            click.echo("   Poor security - immediate action needed! ⚠️")
-        
-    except Exception as e:
-        click.echo(f"❌ Audit failed: {e}", err=True)
-        sys.exit(1)
-    finally:
-        pm.lock()
+                'username': entry.get('username', ''),
+                'score': analysis['score'],
+                'feedback': analysis['feedback'],
+                'age_days': age,
+                'old': age is not None and age > ui.OLD_AFTER_DAYS,
+                'reused_with': [],
+                'breach_count': breach_count,
+            })
+            sites_by_password.setdefault(fingerprint, []).append(site)
+    
+    # Every entry that shares its password lists the others
+    for r in results:
+        group = next(g for g in sites_by_password.values() if r['site'] in g)
+        r['reused_with'] = [other for other in group if other != r['site']]
+
+    total = len(results)
+    stats = {
+        'total': total,
+        'strong': sum(r['score'] >= 60 for r in results),
+        'weak': sum(40 <= r['score'] < 60 for r in results),
+        'very_weak': sum(r['score'] < 40 for r in results),
+        'old': sum(r['old'] for r in results),
+        'reused': sum(bool(r['reused_with']) for r in results),
+        'breached': sum(r['breach_count'] > 0 for r in results),
+        'breach_errors': breach_errors,
+    }
+    score = stats['strong'] / total * 100
+    if stats['breached']:
+        score -= 30
+    if stats['reused']:
+        score -= 10
+    stats['security_score'] = round(max(0.0, score), 1)
+
+    shown = [r for r in results
+             if not (weak_only and r['score'] >= 60) and not (old_only and not r['old'])]
+
+    if as_json:
+        ui.print_json({'summary': stats, 'entries': shown})
+        return
+
+    table = ui.new_table("Site", "Username", "Strength", "Age", "Issues")
+    for r in shown:
+        issues = []
+        if r['breach_count']:
+            issues.append(f"[bold red]breached ({r['breach_count']:,}×)[/]")
+        if r['reused_with']:
+            issues.append(f"[yellow]same as {user(', '.join(r['reused_with']))}[/]")
+        if r['old']:
+            issues.append("[yellow]old[/]")
+        if verbose and r['score'] < 60 and r['feedback']:
+            issues.append(f"[dim]{user('; '.join(r['feedback']))}[/]")
+        table.add_row(f"[bold]{user(r['site'])}[/]", user(r['username']), ui.strength_text(r['score']),
+                      ui.format_age(r['age_days']), ", ".join(issues) or "[green]—[/]")
+    if shown:
+        ui.console.print(table)
+        ui.console.print()
+
+    def pct(n):
+        return f"{n} ({n / total * 100:.0f}%)"
+
+    summary = Table.grid(padding=(0, 2))
+    summary.add_column(style="dim")
+    summary.add_column()
+    summary.add_row("Entries", str(total))
+    summary.add_row("Strong or good", pct(stats['strong']))
+    summary.add_row("Weak", pct(stats['weak']))
+    summary.add_row("Very weak", pct(stats['very_weak']))
+    summary.add_row("Reused", pct(stats['reused']))
+    summary.add_row(f"Older than {ui.OLD_AFTER_DAYS} days", pct(stats['old']))
+    if breaches:
+        summary.add_row("Breached", pct(stats['breached']))
+    colour = "green" if stats['security_score'] >= 75 else "yellow" if stats['security_score'] >= 50 else "red"
+    summary.add_row("Security score", f"[bold {colour}]{stats['security_score']:.0f}/100[/]")
+    ui.console.print(summary)
+
+    ui.console.print()
+    if breach_errors:
+        ui.error(f"Breach check failed for {breach_errors} password(s); check your internet connection")
+
+    todo = []
+    if stats['breached']:
+        todo.append(f"Change the {stats['breached']} breached password(s) first")
+    if stats['very_weak'] or stats['weak']:
+        todo.append(f"Replace {stats['very_weak'] + stats['weak']} weak password(s): vk edit <site> -g")
+    if stats['reused']:
+        todo.append(f"Give each of the {stats['reused']} entries sharing a password its own: vk edit <site> -g")
+    if stats['old']:
+        todo.append(f"Consider updating {stats['old']} old password(s)")
+    if not breaches:
+        todo.append("Check for breached passwords with 'vk audit -b'")
+    for item in todo:
+        ui.info(item)
 
 
 @cli.command()
-@click.option('--site', '-s', help='Check specific site only')
-@click.option('--verbose', '-v', is_flag=True, help='Show detailed breach information')
-def breaches(site, verbose):
+@click.option('--site', '-s', shell_complete=complete_site, help='Check specific site only')
+@click.option('--verbose', '-v', is_flag=True, help='Also list the entries that are clean')
+@with_vault
+def breaches(pm, site, verbose):
     """Check passwords against known data breaches using HaveIBeenPwned
-    
+
+    Only the first 5 characters of each password's SHA-1 hash are sent.
+
     Examples:
         vk breaches                    # Check all passwords
         vk breaches -s github.com      # Check specific site
-        vk breaches -v                 # Verbose output with details
     """
-    pm = get_password_manager()
-    
-    # Unlock vault
-    unlock_vault(pm)
-    
-    try:
-        breach_checker = BreachChecker()
-        
-        # Get sites to check
-        if site:
-            # Check specific site
-            if not pm.get_password(site):
-                # Try fuzzy search
-                matches = pm.search_sites(site)
-                if not matches:
-                    click.echo(f"❌ No password found for '{site}'", err=True)
-                    return
-                
-                if len(matches) == 1:
-                    site = matches[0]
-                    click.echo(f"Found: {site}")
-                else:
-                    click.echo(f"Multiple matches for '{site}':")
-                    for i, match in enumerate(matches[:5], 1):
-                        click.echo(f"  {i}. {match}")
-                    click.echo("\nPlease use the exact site name")
-                    return
-            
-            sites = [site]
-        else:
-            sites = pm.list_sites()
-        
-        if not sites:
-            click.echo("No passwords to check")
-            return
-        
-        click.echo(f"\n🔍 Checking {len(sites)} password(s) against breach database...")
-        click.echo("   Using HaveIBeenPwned API (k-anonymity protocol)")
-        click.echo("   Your passwords are never sent to the service\n")
-        
-        breached_passwords = []
-        clean_passwords = []
-        failed_checks = []
-        
-        # Check each password
-        for i, site_name in enumerate(sites, 1):
-            if len(sites) > 1:
-                click.echo(f"\rProgress: {i}/{len(sites)}", nl=False)
-            
-            data = pm.get_password(site_name)
-            password_text = data['password']
-            
-            # Check against breaches
-            result = breach_checker.check_password(password_text)
-            
+    sites = [resolve_site(pm, site)] if site else pm.list_sites()
+    if not sites:
+        ui.info("No passwords to check")
+        return
+
+    checker = BreachChecker()
+    breached, clean, failed = [], [], []
+    with ui.err_console.status(f"Checking {len(sites)} password(s) with HaveIBeenPwned…"):
+        for name in sites:
+            result = checker.check_password(pm.get_password(name)['password'])
             if result['error']:
-                failed_checks.append({'site': site_name, 'message': result['message']})
+                failed.append((name, result['message']))
             elif result['count'] > 0:
-                breached_passwords.append({
-                    'site': site_name,
-                    'username': data.get('username', ''),
-                    'count': result['count'],
-                    'severity': result['severity'],
-                    'recommendation': result['recommendation']
-                })
+                breached.append((name, result))
             else:
-                clean_passwords.append({
-                    'site': site_name,
-                    'username': data.get('username', '')
-                })
-        
-        if len(sites) > 1:
-            click.echo()  # New line after progress
-        
-        # Display results
-        if breached_passwords:
-            click.echo(f"\n🚨 Found {len(breached_passwords)} breached password(s):")
-            click.echo("=" * 50)
-            
-            for breach in breached_passwords:
-                click.echo(f"\n🔴 {click.style(breach['site'], bold=True, fg='red')}")
-                click.echo(f"   Username: {breach['username']}")
-                click.echo(f"   Found in: {breach['count']:,} breaches")
-                click.echo(f"   Severity: {breach['severity']}")
-                
-                if verbose:
-                    click.echo(f"   Recommendation: {breach['recommendation']}")
-                
-                # Priority based on breach count
-                if breach['count'] > 10000:
-                    click.echo(f"   🚨 CRITICAL: Change immediately!")
-                elif breach['count'] > 1000:
-                    click.echo(f"   ⚠️  HIGH: Change as soon as possible")
-                else:
-                    click.echo(f"   ⚠️  MEDIUM: Consider changing")
-        
-        if clean_passwords:
-            if verbose or not breached_passwords:
-                click.echo(f"\n✅ {len(clean_passwords)} password(s) not found in breaches:")
-                for clean in clean_passwords:
-                    click.echo(f"   🟢 {clean['site']} ({clean['username']})")
-        
-        if failed_checks:
-            click.echo(f"\n❌ Could not check {len(failed_checks)} password(s):")
-            for failed in failed_checks:
-                click.echo(f"   {failed['site']}: {failed['message']}")
-        
-        # Summary and recommendations
-        total_checked = len(sites) - len(failed_checks)
-        if total_checked == 0:
-            click.echo("\n❌ Breach check failed - make sure you have an internet connection", err=True)
-            sys.exit(1)
-        breach_percentage = (len(breached_passwords) / total_checked) * 100
-        
-        click.echo(f"\n📊 Breach Check Summary:")
-        click.echo("=" * 30)
-        click.echo(f"Passwords checked: {total_checked}")
-        if failed_checks:
-            click.echo(f"Not checked (errors): {len(failed_checks)}")
-        click.echo(f"Breached: {len(breached_passwords)} ({breach_percentage:.1f}%)")
-        click.echo(f"Clean: {len(clean_passwords)} ({100-breach_percentage:.1f}%)")
-        
-        if breached_passwords:
-            click.echo(f"\n💡 Next Steps:")
-            click.echo("1. Change all breached passwords immediately")
-            click.echo("2. Enable 2FA where possible")
-            click.echo("3. Use unique passwords for each site")
-            click.echo("4. Consider using generated passwords: vk add -g")
-            
-            # Sort by severity for priority
-            critical = [b for b in breached_passwords if b['count'] > 10000]
-            high = [b for b in breached_passwords if 1000 < b['count'] <= 10000]
-            medium = [b for b in breached_passwords if b['count'] <= 1000]
-            
-            if critical:
-                click.echo(f"\n🚨 CRITICAL (change first): {', '.join([b['site'] for b in critical])}")
-            if high:
-                click.echo(f"⚠️  HIGH priority: {', '.join([b['site'] for b in high])}")
-            if medium:
-                click.echo(f"⚠️  MEDIUM priority: {', '.join([b['site'] for b in medium])}")
-        elif not failed_checks:
-            click.echo(f"\n🎉 Great! None of your passwords were found in known breaches.")
-            click.echo(f"   Keep up the good security practices!")
-        
-    except Exception as e:
-        click.echo(f"❌ Breach check failed: {e}", err=True)
-        if "requests" in str(e).lower():
-            click.echo("   Make sure you have an internet connection")
-        sys.exit(1)
-    finally:
-        pm.lock()
+                clean.append(name)
+
+    if breached:
+        table = ui.new_table("Site", "Seen in breaches", "Severity", title="Breached passwords")
+        for name, result in sorted(breached, key=lambda b: -b[1]['count']):
+            table.add_row(f"[bold red]{user(name)}[/]", f"{result['count']:,}", result['severity'])
+        ui.console.print(table)
+    if verbose and clean:
+        ui.console.print("[green]Not found in breaches:[/] " + ", ".join(user(name) for name in clean))
+    for name, message in failed:
+        ui.error(f"Could not check {user(name)}: {user(message)}")
+
+    if len(failed) == len(sites):
+        ui.fail("Breach check failed - make sure you have an internet connection")
+
+    ui.err_console.print(f"Checked {len(sites) - len(failed)} · [red]{len(breached)} breached[/] · "
+                         f"[green]{len(clean)} clean[/]" + (f" · {len(failed)} failed" if failed else ""))
+    if breached:
+        ui.warning("Change breached passwords now: vk edit <site> -g")
+    elif not failed:
+        ui.success("None of your passwords were found in known breaches.")
 
 
 @cli.command()
-@click.option('--password', '-p', help='Backup password (default: use master password)')
+@click.option('--password', '-p', help='Backup password (avoid: it ends up in your shell history)')
 @click.option('--output', '-o', help='Backup file path (default: auto-generate)')
 def backup(password, output):
     """Create secure encrypted backup of your vault"""
     pm = get_password_manager()
-    
-    # Unlock vault
-    master_password = unlock_vault(pm)
-    
+    master_password = open_vault(pm)
+
     try:
-        # Use provided backup password or prompt for one
         backup_password = password
         if not backup_password:
-            click.echo("\n🔐 Backup Security:")
-            click.echo("   You can use the same master password or a different one for the backup.")
-            
-            use_same = click.confirm("   Use the same master password for backup?", default=True)
-            if use_same:
+            if master_password and click.confirm("Protect the backup with your master password?", default=True, err=True):
                 backup_password = master_password
             else:
-                backup_password = prompt_master_password(confirm=True)
-                if not backup_password:
-                    click.echo("❌ Backup cancelled!", err=True)
-                    return
-        
-        # Create backup
+                ui.info("Choose a password for the backup.")
+                backup_password = getpass.getpass("Backup password: ")
+                if not backup_password or getpass.getpass("Confirm backup password: ") != backup_password:
+                    ui.fail("Backup passwords are empty or don't match")
+
         backup_path = pm.create_secure_backup(backup_password, output)
-        
-        click.echo(f"\n✅ Secure backup created: {backup_path}")
-        click.echo("   This single file is encrypted and portable; it is all you need to restore.")
-        click.echo("   Store it in a safe location separate from your main vault.")
-        
-    except Exception as e:
-        click.echo(f"❌ Backup failed: {e}", err=True)
-        sys.exit(1)
+        ui.success(f"Backup created: {user(backup_path)}")
+        ui.info("This one file is all you need to restore. Keep it somewhere other than this computer.")
+    except (VaultError, ValueError, OSError) as e:
+        ui.fail(f"Backup failed: {user(e)}")
     finally:
         pm.lock()
 
 
 @cli.command()
-@click.argument('backup_file')
-@click.option('--password', '-p', help='Backup password')
+@click.argument('backup_file', type=click.Path(exists=True, dir_okay=False))
+@click.option('--password', '-p', help='Backup password (avoid: it ends up in your shell history)')
 def restore(backup_file, password):
     """Restore vault from secure backup"""
     pm = get_password_manager()
-    
-    if not os.path.exists(backup_file):
-        click.echo(f"❌ Backup file not found: {backup_file}", err=True)
-        sys.exit(1)
-    
-    # Warn about overwriting current vault
+
     if pm.storage.exists():
-        click.echo("⚠️  Warning: This will overwrite your current vault!")
-        if not click.confirm("   Continue with restore?"):
-            click.echo("Restore cancelled.")
+        ui.warning("This replaces everything in your current vault with the backup.")
+        if not click.confirm("Continue?", default=False, err=True):
             return
-    
-    # Get backup password
-    backup_password = password
+
+    backup_password = password or getpass.getpass("Backup password: ")
     if not backup_password:
-        backup_password = getpass.getpass("Backup password: ")
-        if not backup_password:
-            click.echo("❌ Restore cancelled!", err=True)
-            return
-    
+        ui.fail("Restore cancelled")
+
     # Unlock the current vault (if any): the restored data keeps its master password
     master_password = None
     if pm.storage.exists():
-        unlock_vault(pm)
+        open_vault(pm)
     else:
-        # New vault - get master password for the restored vault
-        click.echo("\n🔐 Master Password for Restored Vault:")
-        master_password = prompt_master_password(confirm=True)
+        ui.info("Choose a master password for the restored vault.")
+        master_password = prompt_new_master_password()
         if not master_password:
-            click.echo("❌ Restore cancelled!", err=True)
-            return
-    
+            ui.fail("Restore cancelled")
+
     try:
         backup_date = pm.restore_from_backup(backup_file, backup_password, master_password)
-        click.echo(f"\n✅ Vault successfully restored from backup created on {backup_date}!")
+        ui.success(f"Vault restored from the backup made on {user(backup_date[:10])}")
     except Exception as e:
-        click.echo(f"❌ Restore failed: {e}", err=True)
-        sys.exit(1)
+        ui.fail(f"Restore failed: {user(e)}")
     finally:
         if pm.unlocked:
             pm.lock()
 
 
 @cli.command()
-def interactive():
-    """Launch interactive mode with a professional interface"""
+def passwd():
+    """Change the master password"""
     pm = get_password_manager()
-    
-    # Check if vault exists
     if not pm.storage.exists():
-        show_welcome_screen()
-        if click.confirm("\n    Create a new password vault?", default=True):
-            if not create_new_vault():
-                return
-        else:
-            return
-    
-    # Professional splash screen
-    show_splash_screen()
-    
-    # Unlock vault with styled prompt
-    click.echo("\n    🔐 Enter Master Password")
-    click.echo("    " + "─" * 30)
-    password = getpass.getpass("    Password: ")
-    
+        ui.fail(f"No vault found at {user(pm.storage.filename)}. Create one with 'vk init'.")
+    current = unlock_with_password(pm)
+
     try:
-        unlocked = bool(password) and pm.unlock(password)
-    except VaultError as e:
-        click.echo(f"\n    ❌ {e}")
-        unlocked = False
-    if not unlocked:
-        click.echo("\n    ❌ Authentication failed")
-        time.sleep(1)
-        return
-    
-    click.echo("\n    ✅ Vault unlocked successfully")
-    time.sleep(0.5)
-    
-    try:
-        # Main application loop
-        main_menu_loop(pm)
-    
-    except KeyboardInterrupt:
-        show_exit_screen()
-    except Exception as e:
-        click.echo(f"\n    ❌ Unexpected error: {e}", err=True)
-        click.echo("    Please report this issue if it persists.")
-        click.pause()
+        ui.info("Choose a new master password.")
+        new_password = prompt_new_master_password()
+        if not new_password:
+            sys.exit(1)
+
+        pm.change_master_password(current, new_password)
+        end_session(pm.storage.filename)
+        ui.success("Master password changed")
+        ui.info("Existing backups keep the password they were created with. Any 'vk unlock' session has ended.")
+    except (VaultError, ValueError, OSError) as e:
+        ui.fail(f"Could not change the master password: {user(e)}")
     finally:
         pm.lock()
 
 
-def show_welcome_screen():
-    """Display professional welcome screen for new users"""
-    click.clear()
-    click.echo("\n" * 3)
-    click.echo("    ╔═══════════════════════════════════════════════════════╗")
-    click.echo("    ║                                                       ║")
-    click.echo("    ║              Welcome to VaultKey                      ║")
-    click.echo("    ║         Professional Password Manager                 ║")
-    click.echo("    ║                                                       ║")
-    click.echo("    ╚═══════════════════════════════════════════════════════╝")
-    click.echo()
-    click.echo("    🔒 AES-256-GCM encryption with Argon2id key derivation")
-    click.echo("    📱 Local storage - your data never leaves your device")
-    click.echo("    🚀 Fast, secure, and easy to use")
-    click.echo()
-    click.echo("    No vault detected. Let's set up your secure vault!")
+def _shell_export(token: str, shell: str) -> str:
+    if shell == 'fish':
+        return f'set -gx {SESSION_ENV} "{token}"'
+    if shell == 'powershell':
+        return f'$env:{SESSION_ENV}="{token}"'
+    if shell == 'cmd':
+        return f'set {SESSION_ENV}={token}'
+    return f'export {SESSION_ENV}="{token}"'
 
 
-def show_splash_screen():
-    """Display professional splash screen"""
-    click.clear()
-    click.echo("\n" * 3)
-    click.echo(click.style("    ██╗   ██╗ █████╗ ██╗   ██╗██╗  ████████╗██╗  ██╗███████╗██╗   ██╗", fg='cyan'))
-    click.echo(click.style("    ██║   ██║██╔══██╗██║   ██║██║  ╚══██╔══╝██║ ██╔╝██╔════╝╚██╗ ██╔╝", fg='cyan'))
-    click.echo(click.style("    ██║   ██║███████║██║   ██║██║     ██║   █████╔╝ █████╗   ╚████╔╝ ", fg='cyan'))
-    click.echo(click.style("    ╚██╗ ██╔╝██╔══██║██║   ██║██║     ██║   ██╔═██╗ ██╔══╝    ╚██╔╝  ", fg='cyan'))
-    click.echo(click.style("     ╚████╔╝ ██║  ██║╚██████╔╝███████╗██║   ██║  ██╗███████╗   ██║   ", fg='cyan'))
-    click.echo(click.style("      ╚═══╝  ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝   ╚═╝  ╚═╝╚══════╝   ╚═╝   ", fg='cyan'))
-    click.echo()
-    click.echo(click.style("                        Professional Password Manager", fg='white', dim=True))
-    click.echo(click.style(f"                              Version {__version__}", fg='white', dim=True))
-    time.sleep(1)
+def _default_shell() -> str:
+    if os.name == 'nt':
+        return 'powershell'
+    return 'fish' if os.environ.get('SHELL', '').endswith('fish') else 'posix'
 
 
-def show_exit_screen():
-    """Display professional exit screen"""
-    click.clear()
-    click.echo("\n" * 5)
-    click.echo("    ╔═══════════════════════════════════════════════════════╗")
-    click.echo("    ║                                                       ║")
-    click.echo("    ║            Thank you for using VaultKey               ║")
-    click.echo("    ║         Your passwords are safely encrypted           ║")
-    click.echo("    ║                                                       ║")
-    click.echo("    ╚═══════════════════════════════════════════════════════╝")
-    click.echo()
-    click.echo("    🔒 Vault locked")
-    click.echo("    👋 Goodbye!")
-    click.echo("\n" * 2)
-    time.sleep(0.5)
+@cli.command()
+@click.option('--timeout', '-t', default=DEFAULT_TIMEOUT_MINUTES, type=click.IntRange(1, 24 * 60),
+              help='Lock again after this many minutes without use', show_default=True)
+@click.option('--shell', type=click.Choice(['posix', 'fish', 'powershell', 'cmd']),
+              help='Shell syntax for the export line (default: detected)')
+def unlock(timeout, shell):
+    """Stay unlocked between commands
 
+    Prints a line that sets VAULTKEY_SESSION. Run it, or let your shell do it:
 
-def main_menu_loop(pm):
-    """Main application loop with professional menu"""
-    while True:
-        sites = pm.list_sites()
-        analyzer = PasswordStrength()
-        
-        # Calculate statistics
-        weak_count = 0
-        for site in sites[:20]:  # Quick sample for performance
-            data = pm.get_password(site)
-            if analyzer.analyze(data['password'])['score'] < 40:
-                weak_count += 1
-        
-        # Display main menu
-        click.clear()
-        display_header(f"Main Menu │ {len(sites)} passwords")
-        
-        # Quick stats bar
-        if sites:
-            security_status = "🟢 Secure" if weak_count == 0 else "🟡 Needs Attention"
-            click.echo(f"    Security Status: {security_status}")
-            click.echo("    " + "─" * 55)
-        
-        # Menu options with better organization
-        menu_items = [
-            ("1", "🔍", "Search Passwords", "Find passwords quickly"),
-            ("2", "➕", "Add Password", "Store a new password"),
-            ("3", "📋", "Browse Vault", "View all passwords"),
-            ("4", "🔐", "Quick Copy", "Copy password to clipboard"),
-            ("", "", "", ""),  # Separator
-            ("5", "🛡️", "Security Audit", "Check password strength"),
-            ("6", "🎲", "Generate Password", "Create secure passwords"),
-            ("", "", "", ""),  # Separator
-            ("7", "⚙️", "Settings", "Configure VaultKey"),
-            ("0", "🚪", "Exit", "Lock vault and exit"),
-        ]
-        
-        for key, icon, title, desc in menu_items:
-            if key:
-                click.echo(f"    {key}. {icon}  {title:<20} {click.style(desc, fg='bright_black')}")
-            else:
-                click.echo()
-        
-        click.echo("\n    " + "─" * 55)
-        
-        # Professional prompt
-        choice = click.prompt("    Select option", type=str, default="", show_default=False)
-        
-        # Handle menu choices
-        if choice == "0" or choice.lower() == "q":
-            if confirm_action("Exit VaultKey?"):
-                show_exit_screen()
-                break
-        
-        elif choice == "1":
-            search_passwords_professional(pm)
-        
-        elif choice == "2":
-            add_password_professional(pm)
-        
-        elif choice == "3":
-            browse_vault_professional(pm)
-        
-        elif choice == "4":
-            quick_copy_professional(pm)
-        
-        elif choice == "5":
-            security_audit_professional(pm)
-        
-        elif choice == "6":
-            password_generator_professional()
-        
-        elif choice == "7":
-            settings_professional(pm)
-        
-        else:
-            show_error("Invalid option. Please try again.")
+        eval "$(vk unlock)"
 
-
-def display_header(title, width=60):
-    """Display a professional header"""
-    click.echo("\n    ┌" + "─" * (width - 2) + "┐")
-    click.echo(f"    │ {title:<{width - 4}} │")
-    click.echo("    └" + "─" * (width - 2) + "┘")
-    click.echo()
-
-
-def confirm_action(message, default=False):
-    """Professional confirmation prompt"""
-    click.echo()
-    result = click.confirm(f"    ⚠️  {message}", default=default)
-    return result
-
-
-def show_error(message):
-    """Display error message professionally"""
-    click.echo()
-    click.echo(f"    {click.style('⚠️  ' + message, fg='yellow')}")
-    time.sleep(1.5)
-
-
-def show_success(message):
-    """Display success message professionally"""
-    click.echo()
-    click.echo(f"    {click.style('✅ ' + message, fg='green')}")
-    time.sleep(1)
-
-
-def search_passwords_professional(pm):
-    """Professional search interface"""
-    click.clear()
-    display_header("Search Passwords")
-    
-    click.echo("    Enter search term (site, username, or notes):")
-    click.echo("    " + "─" * 40)
-    query = click.prompt("    🔍", default="", show_default=False)
-    
-    if not query:
-        return
-    
-    click.echo("\n    Searching...")
-    results = []
-    
-    for site in pm.list_sites():
-        data = pm.get_password(site)
-        if (query.lower() in site.lower() or 
-            query.lower() in data.get('username', '').lower() or 
-            query.lower() in data.get('notes', '').lower()):
-            results.append((site, data))
-    
-    click.clear()
-    display_header(f"Search Results │ '{query}'")
-    
-    if not results:
-        click.echo(f"    No matches found for '{query}'")
-        click.echo("\n    💡 Try a different search term")
-        click.pause("\n    Press any key to continue...")
-        return
-    
-    click.echo(f"    Found {len(results)} match{'es' if len(results) > 1 else ''}:\n")
-    
-    # Display results
-    for i, (site, data) in enumerate(results[:15], 1):
-        click.echo(f"    {i:2}. {site}")
-        click.echo(f"        👤 {data['username']}")
-        click.echo()
-    
-    if len(results) > 15:
-        click.echo(f"    ... and {len(results) - 15} more results")
-    
-    # Action menu
-    click.echo("\n    Actions: (V)iew  (C)opy  (B)ack")
-    action = click.prompt("\n    Action", type=str, default="b").lower()
-    
-    if action in ["v", "c"] and results:
-        if len(results) == 1:
-            selected_site = results[0][0]
-        else:
-            num = click.prompt("    Select number", type=int, default=1)
-            if 1 <= num <= min(len(results), 15):
-                selected_site = results[num-1][0]
-            else:
-                show_error("Invalid selection")
-                return
-        
-        if action == "v":
-            view_password_professional(pm, selected_site)
-        elif action == "c":
-            copy_password_professional(pm, selected_site)
-
-
-def add_password_professional(pm):
-    """Professional add password interface"""
-    click.clear()
-    display_header("Add New Password")
-    
-    click.echo("    Step 1: Basic Information")
-    click.echo("    " + "─" * 40)
-    
-    site = click.prompt("    🌐 Site/Service")
-    username = click.prompt("    👤 Username/Email")
-    
-    if pm.get_password(site):
-        if not confirm_action(f"Password for '{site}' already exists. Replace it?"):
-            return
-    
-    click.echo("\n    Step 2: Password Creation")
-    click.echo("    " + "─" * 40)
-    click.echo("    1. Generate secure password (recommended)")
-    click.echo("    2. Enter password manually")
-    
-    pwd_choice = click.prompt("\n    Choice", type=str, default="1")
-    
-    if pwd_choice == "1":
-        length = click.prompt("    Length", type=int, default=16)
-        password = generate_password(length)
-        
-        click.echo(f"\n    Generated Password:")
-        click.echo(f"    {click.style(password, fg='green', bold=True)}")
-        
-        if not confirm_action("Use this password?", default=True):
-            return
-    else:
-        password = getpass.getpass("\n    Enter password: ")
-        confirm = getpass.getpass("    Confirm password: ")
-        
-        if password != confirm:
-            show_error("Passwords don't match")
-            return
-    
-    notes = ""
-    if click.confirm("\n    Add notes?", default=False):
-        notes = click.prompt("    📝 Notes", default="")
-    
-    click.echo("\n    Saving password...")
-    try:
-        pm.add_password(site, username, password, notes)
-        show_success(f"Password saved for {site}")
-        
-        if confirm_action("Copy password to clipboard?", default=True):
-            if secure_clipboard_copy(password, 30):
-                click.echo("    📋 Password copied to clipboard")
-            else:
-                click.echo("    ⚠️  Clipboard not available")
-    
-    except Exception as e:
-        show_error(f"Failed to save: {e}")
-    
-    click.pause("\n    Press any key to continue...")
-
-
-def browse_vault_professional(pm):
-    """Professional vault browser"""
-    sites = pm.list_sites()
-    if not sites:
-        click.clear()
-        display_header("Browse Vault")
-        click.echo("    Your vault is empty!")
-        click.echo("\n    💡 Press '2' in the main menu to add your first password")
-        click.pause("\n    Press any key to continue...")
-        return
-    
-    page_size = 10
-    current_page = 0
-    
-    while True:
-        total_pages = max(1, (len(sites) - 1) // page_size + 1)
-        current_page = min(current_page, total_pages - 1)
-        
-        start_idx = current_page * page_size
-        end_idx = min(start_idx + page_size, len(sites))
-        page_sites = sites[start_idx:end_idx]
-        
-        click.clear()
-        display_header(f"Browse Vault │ Page {current_page + 1}/{total_pages}")
-        
-        for i, site in enumerate(page_sites, start_idx + 1):
-            data = pm.get_password(site)
-            click.echo(f"    {i:3}. {site}")
-            click.echo(f"         👤 {data['username']}")
-            click.echo()
-        
-        click.echo("    " + "─" * 50)
-        
-        nav_options = []
-        if current_page > 0:
-            nav_options.append("(P)rev")
-        if current_page < total_pages - 1:
-            nav_options.append("(N)ext")
-        nav_options.extend(["(V)iew", "(B)ack"])
-        
-        click.echo("    " + "  ".join(nav_options))
-        
-        action = click.prompt("\n    Action", type=str, default="b").lower()
-        
-        if action == "b":
-            break
-        elif action == "n" and current_page < total_pages - 1:
-            current_page += 1
-        elif action == "p" and current_page > 0:
-            current_page -= 1
-        elif action == "v" and page_sites:
-            try:
-                num = click.prompt("    View number", type=int)
-                if start_idx < num <= start_idx + len(page_sites):
-                    view_password_professional(pm, sites[num-1])
-            except:
-                pass
-
-
-def view_password_professional(pm, site):
-    """Professional password viewer"""
-    data = pm.get_password(site)
-    if not data:
-        show_error(f"Password not found for '{site}'")
-        return
-    
-    click.clear()
-    display_header(f"Password Details │ {site}")
-    
-    click.echo(f"    Username:    {data['username']}")
-    click.echo("    " + "─" * 40)
-    
-    if click.confirm("\n    Show password?", default=False):
-        click.echo(f"    Password:    {click.style(data['password'], fg='yellow', bold=True)}")
-    else:
-        click.echo(f"    Password:    {'●' * len(data['password'])}")
-    
-    if data.get('notes'):
-        click.echo(f"\n    Notes:       {data['notes']}")
-    
-    click.echo(f"\n    Created:     {data.get('created', 'Unknown')[:10]}")
-    click.echo(f"    Modified:    {data.get('modified', 'Unknown')[:10]}")
-    
-    click.echo("\n    Actions: (C)opy  (B)ack")
-    action = click.prompt("\n    Action", type=str, default="b").lower()
-    
-    if action == "c":
-        copy_password_professional(pm, site)
-
-
-def copy_password_professional(pm, site):
-    """Copy password with professional feedback"""
-    data = pm.get_password(site)
-    if secure_clipboard_copy(data['password'], 30):
-        click.echo()
-        click.echo("    ┌─────────────────────────────────────────┐")
-        click.echo("    │         ✅ Password Copied!             │")
-        click.echo("    │                                         │")
-        click.echo("    │    📋 Clipboard will clear in 30s      │")
-        click.echo("    └─────────────────────────────────────────┘")
-        
-        time.sleep(2)
-    else:
-        show_error("Clipboard not available. Install 'pyperclip'")
-        time.sleep(2)
-
-
-def quick_copy_professional(pm):
-    """Quick copy with search"""
-    click.clear()
-    display_header("Quick Copy")
-    
-    site_query = click.prompt("    🔍 Site name", default="")
-    
-    if not site_query:
-        return
-    
-    matches = []
-    for site in pm.list_sites():
-        if site_query.lower() in site.lower():
-            matches.append(site)
-    
-    if not matches:
-        show_error(f"No matches for '{site_query}'")
-        return
-    
-    if len(matches) == 1:
-        selected = matches[0]
-    else:
-        click.echo(f"\n    Found {len(matches)} matches:")
-        for i, site in enumerate(matches[:10], 1):
-            data = pm.get_password(site)
-            click.echo(f"    {i}. {site} ({data['username']})")
-        
-        try:
-            choice = click.prompt("\n    Select number", type=int)
-            if 1 <= choice <= len(matches):
-                selected = matches[choice - 1]
-            else:
-                return
-        except:
-            return
-    
-    copy_password_professional(pm, selected)
-
-
-def security_audit_professional(pm):
-    """Professional security audit"""
-    click.clear()
-    display_header("Security Audit")
-    
-    sites = pm.list_sites()
-    if not sites:
-        click.echo("    No passwords to audit")
-        click.pause("\n    Press any key to continue...")
-        return
-    
-    click.echo(f"    Analyzing {len(sites)} passwords...\n")
-    
-    analyzer = PasswordStrength()
-    weak_passwords = []
-    
-    with click.progressbar(sites, label='    Scanning', 
-                          bar_template='    %(label)s  [%(bar)s]  %(info)s',
-                          fill_char='█', empty_char='░') as bar:
-        for site in bar:
-            data = pm.get_password(site)
-            analysis = analyzer.analyze(data['password'])
-            if analysis['score'] < 40:
-                weak_passwords.append((site, analysis['score']))
-    
-    click.clear()
-    display_header("Security Audit Results")
-    
-    if weak_passwords:
-        click.echo(f"    ⚠️  {len(weak_passwords)} weak password(s) found:\n")
-        for site, score in weak_passwords[:5]:
-            click.echo(f"    • {site}")
-        if len(weak_passwords) > 5:
-            click.echo(f"    ... and {len(weak_passwords) - 5} more")
-    else:
-        click.echo("    ✅ All passwords are strong!")
-    
-    click.echo("\n    💡 Recommendations:")
-    click.echo("    • Use the password generator for strong passwords")
-    click.echo("    • Update passwords regularly")
-    click.echo("    • Enable two-factor authentication")
-    
-    click.pause("\n    Press any key to continue...")
-
-
-def password_generator_professional():
-    """Professional password generator"""
-    click.clear()
-    display_header("Password Generator")
-    
-    settings = {
-        'length': 16,
-        'symbols': True,
-        'digits': True,
-        'uppercase': True,
-        'lowercase': True
-    }
-    
-    while True:
-        click.echo("    Current Settings:")
-        click.echo("    " + "─" * 40)
-        click.echo(f"    Length:     {settings['length']} characters")
-        click.echo(f"    Symbols:    {'✓' if settings['symbols'] else '✗'}")
-        click.echo(f"    Numbers:    {'✓' if settings['digits'] else '✗'}")
-        click.echo(f"    Uppercase:  {'✓' if settings['uppercase'] else '✗'}")
-        
-        password = generate_password(
-            length=settings['length'],
-            use_symbols=settings['symbols'],
-            use_digits=settings['digits'],
-            use_uppercase=settings['uppercase']
-        )
-        
-        click.echo("\n    Generated Password:")
-        click.echo("    " + "─" * 40)
-        click.echo(f"    {click.style(password, fg='green', bold=True)}")
-        
-        click.echo("\n    Actions: (C)opy  (R)egenerate  (S)ettings  (B)ack")
-        action = click.prompt("\n    Action", type=str, default="r").lower()
-        
-        if action == "b":
-            break
-        elif action == "c":
-            if secure_clipboard_copy(password, 30):
-                show_success("Password copied to clipboard (clears in 30s)")
-            else:
-                show_error("Clipboard not available")
-        elif action == "s":
-            click.echo("\n    Modify Settings:")
-            settings['length'] = click.prompt("    Length", type=int, default=settings['length'])
-            settings['symbols'] = click.confirm("    Include symbols", default=settings['symbols'])
-            settings['digits'] = click.confirm("    Include numbers", default=settings['digits'])
-            settings['uppercase'] = click.confirm("    Include uppercase", default=settings['uppercase'])
-        
-        click.clear()
-        display_header("Password Generator")
-
-
-def settings_professional(pm):
-    """Professional settings interface"""
-    click.clear()
-    display_header("Settings")
-    
-    click.echo("    1. 🔐 Change Master Password")
-    click.echo("    2. 📊 View Statistics")
-    click.echo("    3. 🔄 Import/Export")
-    click.echo("    0. 🔙 Back")
-    
-    choice = click.prompt("\n    Select option", type=str, default="0")
-    
-    if choice == "1":
-        change_master_password_professional(pm)
-    elif choice == "2":
-        show_statistics_professional(pm)
-    elif choice == "3":
-        click.echo("\n    Use the 'vk export-passwords' and 'vk import-passwords' commands")
-    
-    click.pause("\n    Press any key to continue...")
-
-
-def change_master_password_professional(pm):
-    """Change the master password from interactive mode"""
-    click.echo()
-    current = getpass.getpass("    Current master password: ")
-    new_password = getpass.getpass("    New master password: ")
-    confirm_pwd = getpass.getpass("    Confirm new password: ")
-    
-    if not new_password or new_password != confirm_pwd:
-        show_error("New passwords don't match or are empty")
-        return
-    
-    try:
-        if pm.change_master_password(current, new_password):
-            show_success("Master password changed")
-        else:
-            show_error("Current master password is incorrect")
-    except VaultError as e:
-        show_error(str(e))
-
-
-def show_statistics_professional(pm):
-    """Display vault statistics"""
-    click.clear()
-    display_header("Vault Statistics")
-    
-    sites = pm.list_sites()
-    click.echo(f"    Total Passwords: {len(sites)}")
-    
-    if sites:
-        analyzer = PasswordStrength()
-        strength_counts = {'strong': 0, 'weak': 0}
-        
-        for site in sites:
-            data = pm.get_password(site)
-            score = analyzer.analyze(data['password'])['score']
-            if score >= 60:
-                strength_counts['strong'] += 1
-            else:
-                strength_counts['weak'] += 1
-        
-        click.echo(f"    Strong Passwords: {strength_counts['strong']}")
-        click.echo(f"    Weak Passwords: {strength_counts['weak']}")
-    
-    click.pause("\n    Press any key to continue...")
-
-
-def create_new_vault():
-    """Interactive vault creation"""
+    While the session lasts, commands (and tab-completion of entry names) work
+    without the master password. 'vk lock' ends it.
+    """
     pm = get_password_manager()
-    
-    click.clear()
-    display_header("Create New Vault")
-    
-    click.echo("    Welcome to VaultKey!")
-    click.echo("    Let's create your secure password vault.\n")
-    
-    click.echo("    📋 Master Password Requirements:")
-    click.echo("    • At least 12 characters long")
-    click.echo("    • Mix of letters, numbers, and symbols")
-    click.echo("    • Something you can remember!\n")
-    
-    password = getpass.getpass("    Master password: ")
-    confirm_pwd = getpass.getpass("    Confirm password: ")
-    
-    if password != confirm_pwd:
-        show_error("Passwords don't match")
-        return False
-    
-    click.echo("\n    Creating encrypted vault...")
-    
+    if not pm.storage.exists():
+        ui.fail(f"No vault found at {user(pm.storage.filename)}. Create one with 'vk init'.")
+    unlock_with_password(pm)
     try:
-        pm.create_vault(password)
-        show_success("Vault created successfully!")
-        click.pause("\n    Press any key to continue...")
-        return True
-    except Exception as e:
-        show_error(f"Failed to create vault: {e}")
-        return False
+        token = start_session(pm.crypto, pm.storage.filename, timeout)
+    finally:
+        pm.lock()
+
+    shell = shell or _default_shell()
+    click.echo(_shell_export(token, shell))
+    ui.success(f"Unlocked. Locks again after {timeout} idle minute(s), or with 'vk lock'.")
+    if sys.stdout.isatty():
+        hint = 'eval "$(vk unlock)"' if shell in ('posix', 'fish') else 'the line above'
+        ui.info(f"Run the line above to use the session in this shell (next time: {hint})")
+
+
+@cli.command()
+def lock():
+    """End the 'vk unlock' session"""
+    if end_session(get_password_manager().storage.filename):
+        ui.success("Vault locked. The session token no longer works in any shell.")
+    else:
+        ui.info("The vault wasn't unlocked")
+
+
+@cli.command()
+def status():
+    """Show where the vault is and whether a session is active"""
+    pm = get_password_manager()
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="dim")
+    grid.add_column()
+    grid.add_row("Version", __version__)
+    grid.add_row("Vault", user(pm.storage.filename))
+
+    info = pm.storage.get_file_info()
+    if info:
+        modified = datetime.fromtimestamp(info['modified']).strftime('%Y-%m-%d %H:%M')
+        grid.add_row("File", f"{info['size']:,} bytes · modified {modified} · permissions {info['permissions']}")
+        expires = session_expiry(pm.storage.filename)
+        if expires:
+            minutes = max(1, int((expires - datetime.now().timestamp()) // 60))
+            grid.add_row("Session", f"[green]unlocked[/] · locks after {minutes} more minute(s) without use")
+        else:
+            grid.add_row("Session", "locked")
+    else:
+        grid.add_row("State", "[yellow]no vault yet[/] · create one with 'vk init'")
+    ui.console.print(grid)
+
+
+@cli.command()
+@click.argument('shell', type=click.Choice(['bash', 'zsh', 'fish']))
+def completion(shell):
+    """Print a shell completion script
+
+    Entry names complete while a 'vk unlock' session is active. Add to your shell profile:
+
+        eval "$(vk completion zsh)"      # ~/.zshrc
+        eval "$(vk completion bash)"     # ~/.bashrc
+        vk completion fish | source      # ~/.config/fish/config.fish
+    """
+    prog_name = os.path.basename(sys.argv[0]) if sys.argv and sys.argv[0] else "vk"
+    if prog_name not in ("vk", "vaultkey"):
+        prog_name = "vk"
+    complete_var = f"_{prog_name.upper()}_COMPLETE"
+    click.echo(get_completion_class(shell)(cli, {}, prog_name, complete_var).source())
+
+
+@cli.command()
+def interactive():
+    """Launch interactive mode with menus and search"""
+    from .interactive import run_interactive
+
+    pm = get_password_manager()
+    try:
+        run_interactive(pm)
+    finally:
+        pm.lock()
 
 
 @cli.command()
 def version():
     """Show VaultKey version and info"""
-    click.echo("\n🔐 VaultKey Password Manager")
-    click.echo(f"Version: {__version__}")
-    click.echo(f"Author: {__author__}")
-    click.echo("License: MIT")
-    click.echo("\nA secure, local password manager with strong encryption")
-    click.echo("Your passwords never leave your device!")
-    click.echo("\nFor help: vk --help")
+    ui.console.print(f"[bold]VaultKey[/] {__version__} · by {__author__} · MIT License")
+    ui.console.print(f"Vault: {user(get_password_manager().storage.filename)}")
+    ui.console.print("Help: vk --help · https://github.com/dhruvkulkarni02/vaultkey")
 
 
 @cli.command('_clear-clipboard', hidden=True)

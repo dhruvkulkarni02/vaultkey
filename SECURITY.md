@@ -19,7 +19,7 @@ VaultKey protects the vault file at rest. Someone who obtains a copy of the vaul
 
 What VaultKey does **not** protect against:
 
-- **Malware or another user with access to your account while the vault is unlocked.** They can read process memory, the clipboard, or record your keystrokes.
+- **Malware or another user with access to your account while the vault is unlocked**, including while a `vk unlock` session is active. They can read process memory, the clipboard, or record your keystrokes.
 - **A weak master password.** Argon2id slows down guessing but cannot save a password that is easy to guess.
 - **Copies of a 1.0.x vault file.** These contain a value that allows fast offline guessing. After upgrading, change your master password with `vk passwd`.
 - **Plaintext exports.** Files written by `vk export-passwords --include-passwords` are not encrypted.
@@ -30,6 +30,7 @@ What VaultKey does **not** protect against:
 - **Encryption:** AES-256-GCM with a random 96-bit nonce per write. The header is authenticated as associated data.
 - **Storage:** writes are atomic (a temporary file with mode 0600, fsync, then rename).
 - **Breach checks:** only the first 5 hex characters of the password's SHA-1 hash are sent to the HaveIBeenPwned range API, and responses are padded.
+- **Sessions (`vk unlock`):** the vault key is encrypted with AES-256-GCM under a random 256-bit token and written to a 0600 file next to the vault. The token is held only in the shell's `VAULTKEY_SESSION` variable, so neither the file nor the token is useful alone. Sessions end after the idle timeout (15 minutes by default), on `vk lock`, and on `vk passwd`. While a session is active, any program running as you that can read that shell's environment can use the vault, so lock it when you're done.
 - **Clipboard:** clearing is done by a detached helper process. It receives a keyed fingerprint of the copied password, never the password itself.
 
 VaultKey has not had an independent security audit.

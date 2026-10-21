@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vaultkey-cli"
-version = "2.0.0"
+version = "2.1.0"
 description = "Local, offline CLI password manager with Argon2id key derivation and AES-256-GCM encryption"
 readme = "README.md"
 license = "MIT"
@@ -50,7 +50,8 @@ requires-python = ">=3.9"
 dependencies = [
     "cryptography>=41.0.0",
     "click>=8.0.0",
-    "tabulate>=0.9.0",
+    "rich>=13.0.0",
+    "questionary>=2.0.0",
     "pyperclip>=1.8.0",
     "argon2-cffi>=21.2.0",
     "requests>=2.25.0",
@@ -130,7 +131,7 @@ strict_equality = true
 [[tool.mypy.overrides]]
 module = [
     "pyperclip.*",
-    "tabulate.*",
+    "questionary.*",
     "argon2.*",
 ]
 ignore_missing_imports = true

@@ -11,7 +11,15 @@ VaultKey keeps your passwords in a single encrypted file on your own machine and
 
 ## ✨ What's New
 
-The latest update is a security and reliability overhaul:
+### 2.1: a friendlier interface
+
+- **Redesigned interactive mode**: arrow-key menus, type-to-filter search, an entry screen with copy, edit, history, rename and delete, and a security check that covers every entry.
+- **Stay unlocked**: `eval "$(vk unlock)"` keeps the vault open for your shell session until it has been idle for 15 minutes, or until `vk lock`.
+- **New commands**: `vk edit`, `vk rename` and `vk history`, plus `vk status` and `vk completion` for shell tab-completion of entry names.
+- **Scriptable output**: `--json` on `get`, `list`, `search`, `audit` and `generate`; status messages go to stderr so the JSON can be piped.
+- **Clearer output everywhere**: consistent colours and symbols, readable tables, and non-zero exit codes on every error.
+
+### 2.0: security and reliability overhaul
 
 - **New vault format**: AES-256-GCM encryption with an Argon2id key. The salt and KDF settings live in the vault file's header, so there is no separate `salt.bin` to lose.
 - **Fast offline guessing removed**: the old format stored a check value derived from a plain SHA-256 of the master password. Anyone with a copy of the vault could test guesses at SHA-256 speed and skip Argon2. That value is gone.
@@ -36,24 +44,26 @@ The latest update is a security and reliability overhaul:
 - **📊 Security Auditing**: Strength scoring, reused and old password detection
 - **🎲 Password Generator**: Guarantees every selected character type appears
 - **📁 Import/Export**: CSV, JSON, LastPass, Bitwarden, 1Password, Chrome/Edge and KeePass
-- **🎯 Interactive Mode**: Menu-driven terminal interface
+- **🎯 Interactive Mode**: Arrow-key menus with type-to-filter search
+- **🔓 Session Unlock**: Unlock once per shell instead of for every command
+- **🤖 Scriptable**: `--json` output and shell tab-completion of entry names
 
 ## 📸 Screenshots
 
 ### Interactive Mode
-![Interactive Mode](assets/screenshots/interactive-mode.png)
+![Interactive Mode](assets/screenshots/interactive-mode.svg)
 
 ### Password List
-![Password List](assets/screenshots/password-list.png)
+![Password List](assets/screenshots/password-list.svg)
 
 ### Security Audit
-![Security Audit](assets/screenshots/security-audit.png)
+![Security Audit](assets/screenshots/security-audit.svg)
 
 ## 📦 Installation
 
 ### macOS, Linux, Windows: pip (recommended)
 ```bash
-pip install "vaultkey-cli @ https://github.com/dhruvkulkarni02/vaultkey/releases/download/v2.0.0/vaultkey_cli-2.0.0-py3-none-any.whl"
+pip install "vaultkey-cli @ https://github.com/dhruvkulkarni02/vaultkey/releases/download/v2.1.0/vaultkey_cli-2.1.0-py3-none-any.whl"
 ```
 
 Or install the latest source:
@@ -86,6 +96,12 @@ vk add -s github.com -u developer@email.com -g
 # Copy it to the clipboard; it is cleared after 30 seconds
 vk cp github
 
+# Tired of typing the master password? Stay unlocked in this shell
+eval "$(vk unlock)"
+
+# Or use the menus
+vk interactive
+
 # Make a backup and keep it somewhere safe
 vk backup -o ~/vaultkey-backup.vkbak
 ```
@@ -115,10 +131,41 @@ vk list -f git                                    # Filter by 'git'
 vk list -v                                        # Verbose with details
 vk list --weak-only                               # Show only weak passwords
 
+# Change entries
+vk edit github.com -g                             # New generated password (old one goes to history)
+vk edit github.com -u new-username -n "work"      # Change username and notes
+vk edit github.com                                # Asks for each field
+vk rename github.com GitHub
+vk history github.com                             # Previous passwords (add --show to reveal)
+
 # Delete passwords
 vk delete github.com                              # Delete with confirmation
 vk delete github.com -f                           # Skip the confirmation
 ```
+
+Commands that take an entry name accept part of it when only one entry matches: `vk cp git` copies the password for `github.com`. `vk delete` always needs the full name.
+
+### Staying Unlocked
+```bash
+eval "$(vk unlock)"                               # Unlock for this shell (prompts once)
+vk unlock -t 60                                   # Lock after 60 idle minutes instead of 15
+vk status                                         # Is the vault unlocked, and for how long?
+vk lock                                           # End the session for every shell
+```
+
+`vk unlock` prints a line that sets `VAULTKEY_SESSION`; the `eval` runs it in your shell. Commands in that shell then work without the master password until the session has been idle for the timeout. In fish use `vk unlock | source`; in PowerShell, `vk unlock` prints a `$env:` line to run.
+
+### Scripting and Shell Completion
+```bash
+vk get -s github.com --json | jq -r .password     # Entry as JSON, password included
+vk list --json | jq -r '.[].site'                 # All entries (no passwords)
+vk audit --json > audit.json
+vk generate -c 3 --json
+
+eval "$(vk completion zsh)"                       # Add to ~/.zshrc (also: bash, fish)
+```
+
+JSON goes to stdout, and status messages to stderr. Every error exits with a non-zero status. Entry names tab-complete while a `vk unlock` session is active; without one there is nothing to complete from, because the names are encrypted too.
 
 ### Master Password and Backups
 ```bash
@@ -177,7 +224,15 @@ vk export-passwords --format json -o export.json --include-passwords
 vk interactive
 ```
 
-A menu for searching, adding, browsing, copying, auditing and generating passwords. Settings includes changing the master password and vault statistics.
+Arrow keys move, Enter selects, and typing filters long lists; Ctrl-C goes back. From the main menu you can:
+
+- **Find an entry**: type part of a name, then copy the password or username, reveal it, edit, view its history, rename or delete it.
+- **Add an entry** with a generated or typed password.
+- **Generate a password** with adjustable length and character types.
+- **Security check**: every weak, reused or old password, with a shortcut to fix each one.
+- **Settings**: change the master password, create a backup, and see vault details.
+
+It uses your `vk unlock` session if there is one.
 
 ## 📂 Where Your Data Lives
 
@@ -186,6 +241,7 @@ A menu for searching, adding, browsing, copying, auditing and generating passwor
 | Vault | `~/.vaultkey/passwords.encrypted` |
 | Custom vault | Set `VAULTKEY_VAULT=/path/to/vault` |
 | Backups | Where you choose with `-o`; by default `vaultkey_backup_<timestamp>.vkbak` in the current directory |
+| Session | `~/.vaultkey/passwords.encrypted.session` while `vk unlock` is active |
 
 The vault is a single file. Copying it, together with your master password, is enough to open it anywhere.
 
@@ -197,6 +253,7 @@ The vault is a single file. Copying it, together with your master password, is e
 - **Nothing to check guesses against**: the only way to test a master password is to run Argon2id and attempt decryption
 - **Atomic, private files**: the vault and backups are written to a temporary file with mode 0600, flushed to disk, and renamed into place
 - **Clipboard**: clearing is handed to a small background process, which receives only a keyed fingerprint of the password, never the password itself
+- **Sessions**: `vk unlock` stores the vault key encrypted under a random token, in a 0600 file next to the vault. The token itself lives only in your shell's environment, so the file alone is useless. Sessions end after the idle timeout, on `vk lock`, and on `vk passwd`.
 - **Lockout**: in interactive mode, 5 wrong passwords lock you out for 5 minutes. This is a convenience; offline guessing is limited by the cost of Argon2id.
 
 ### File format
@@ -225,8 +282,19 @@ Backups and encrypted exports use the same envelope.
 | `vk list` | Display all stored passwords |
 | `vk search` | Search by site, username or notes, optionally filtered by type |
 | `vk cp` | Copy a password to the clipboard without showing it |
+| `vk edit` | Change an entry's username, password or notes |
+| `vk rename` | Rename an entry |
+| `vk history` | Show an entry's previous passwords |
 | `vk delete` | Remove a password entry |
 | `vk passwd` | Change the master password |
+
+### Session and Shell
+| Command | Description |
+|---------|-------------|
+| `vk unlock` | Stay unlocked in this shell (`eval "$(vk unlock)"`) |
+| `vk lock` | End the session |
+| `vk status` | Show the vault location and session state |
+| `vk completion` | Print a bash, zsh or fish completion script |
 
 ### Security Commands
 | Command | Description |
@@ -288,6 +356,9 @@ vaultkey/
 │   ├── __init__.py
 │   ├── __main__.py        # python -m vaultkey
 │   ├── cli.py             # Command-line interface
+│   ├── interactive.py     # Menu-driven interactive mode
+│   ├── ui.py              # Shared terminal output (tables, colours, JSON)
+│   ├── session.py         # vk unlock / vk lock sessions
 │   ├── manager.py         # Vault operations, migration, backup/restore
 │   ├── crypto.py          # Argon2id + AES-256-GCM envelope, 1.0.x decryption
 │   ├── storage.py         # Atomic, versioned file storage
@@ -326,7 +397,7 @@ Tests run with low Argon2 settings so they finish in seconds. CI runs them on Ub
 
 ### Security Vulnerabilities
 
-If you discover a security vulnerability, please report it privately (a GitHub security advisory or email to the maintainer) instead of opening a public issue.
+If you discover a security vulnerability, please report it privately through a GitHub security advisory (see [SECURITY.md](SECURITY.md)) instead of opening a public issue.
 
 ## 🗺️ Roadmap
 
@@ -340,12 +411,13 @@ If you discover a security vulnerability, please report it privately (a GitHub s
 - [x] Clipboard auto-clear that outlives the command
 - [x] Password generation, strength analysis and breach detection
 - [x] Import/export (CSV, JSON, LastPass, Bitwarden, 1Password, Chrome, KeePass)
-- [x] Interactive mode
+- [x] Interactive mode with arrow-key menus and search
+- [x] Session unlock (`vk unlock` / `vk lock`)
+- [x] `vk edit`, `vk rename` and `vk history`
+- [x] JSON output and shell completion
 - [x] Test suite with cross-platform CI
 
 ### Planned 📋
-- [ ] Session unlock (`vk unlock` / `vk lock`), so you don't type the master password for every command
-- [ ] `vk edit`, `vk rename` and `vk history` commands
 - [ ] Automatic rolling backups
 - [ ] TOTP (2FA) codes
 - [ ] Passphrases from a full diceware word list
@@ -362,7 +434,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [argon2-cffi](https://argon2-cffi.readthedocs.io/) - Argon2 key derivation
 - [HaveIBeenPwned](https://haveibeenpwned.com/) - Breach detection API
 - [Click](https://click.palletsprojects.com/) - CLI framework
-- [tabulate](https://pypi.org/project/tabulate/) - Table formatting
+- [Rich](https://github.com/Textualize/rich) - Terminal formatting
+- [questionary](https://github.com/tmbo/questionary) - Interactive prompts
 
 ---
 

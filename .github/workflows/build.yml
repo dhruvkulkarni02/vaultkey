@@ -56,7 +56,8 @@ jobs:
         import cryptography
         import cryptography.fernet
         import click
-        import tabulate
+        import rich
+        import questionary
         import pyperclip
         import requests
         import urllib
@@ -85,6 +86,9 @@ jobs:
           --collect-all=cryptography \
           --collect-all=argon2 \
           --collect-all=click \
+          --collect-submodules=rich \
+          --collect-all=questionary \
+          --collect-all=prompt_toolkit \
           --collect-all=requests \
           --hidden-import=requests \
           --hidden-import=urllib3 \

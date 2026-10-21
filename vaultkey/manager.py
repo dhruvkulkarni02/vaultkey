@@ -146,6 +146,30 @@ class PasswordManager:
         
         return True
     
+    def unlock_with_crypto(self, crypto: Crypto) -> bool:
+        """
+        Unlock the vault with an already-derived key (e.g. from a `vk unlock` session).
+        
+        Returns:
+            True if unlocked, False if the key doesn't match the vault (for
+            example because the master password has changed since)
+        """
+        if not self.storage.exists():
+            raise VaultNotFoundError("No vault exists! Create one with create_vault() first.")
+        
+        version, data = self.storage.load()
+        if version != CURRENT_VERSION:
+            return False
+        try:
+            decrypted_data = crypto.decrypt(data)
+        except DecryptionError:
+            return False
+        
+        self._cached_passwords = json.loads(decrypted_data)
+        self.crypto = crypto
+        self.unlocked = True
+        return True
+    
     def _register_failed_attempt(self) -> None:
         """Count a failed unlock and start a lockout once the limit is reached"""
         self.failed_attempts += 1
@@ -418,6 +442,29 @@ class PasswordManager:
             self._save()
             return True
         return False
+    
+    def rename_entry(self, site: str, new_site: str) -> bool:
+        """
+        Rename an entry, keeping its password, history and timestamps.
+        
+        Returns:
+            True if renamed, False if site doesn't exist
+            
+        Raises:
+            ValueError: If new_site is empty or already exists
+        """
+        if not self.unlocked:
+            raise VaultLockedError("Vault is locked! Call unlock() first.")
+        
+        passwords = self._cached_passwords["passwords"]
+        if site not in passwords:
+            return False
+        if not new_site or new_site in passwords:
+            raise ValueError(f"An entry named '{new_site}' already exists" if new_site else "New name must not be empty")
+        
+        passwords[new_site] = passwords.pop(site)
+        self._save()
+        return True
     
     def update_password(
         self, 
