@@ -11,6 +11,13 @@ VaultKey keeps your passwords in a single encrypted file on your own machine and
 
 ## ✨ What's New
 
+### 2.2: a full-screen app
+
+- **Run `vk` on its own** to open a full-screen terminal app: entries on the left, details on the right, a live search box, and one-key shortcuts for everything.
+- **Everything in one place**: add, edit, rename, delete, password history, generator, **import and export**, backups and changing the master password, all as dialogs.
+- **See what needs fixing**: weak, reused and old passwords are flagged in the list, and `f` shows only those.
+- **Locks itself** after 5 idle minutes (`vk interactive --lock-after N` to change).
+
 ### 2.1: a friendlier interface
 
 - **Redesigned interactive mode**: arrow-key menus, type-to-filter search, an entry screen with copy, edit, history, rename and delete, and a security check that covers every entry.
@@ -44,14 +51,16 @@ VaultKey keeps your passwords in a single encrypted file on your own machine and
 - **📊 Security Auditing**: Strength scoring, reused and old password detection
 - **🎲 Password Generator**: Guarantees every selected character type appears
 - **📁 Import/Export**: CSV, JSON, LastPass, Bitwarden, 1Password, Chrome/Edge and KeePass
-- **🎯 Interactive Mode**: Arrow-key menus with type-to-filter search
+- **🖥️ Full-Screen App**: Search, browse and edit everything with one-key shortcuts; locks itself when idle
 - **🔓 Session Unlock**: Unlock once per shell instead of for every command
 - **🤖 Scriptable**: `--json` output and shell tab-completion of entry names
 
 ## 📸 Screenshots
 
-### Interactive Mode
-![Interactive Mode](assets/screenshots/interactive-mode.svg)
+### The app (`vk`)
+![VaultKey app](assets/screenshots/app.svg)
+
+![Adding an entry](assets/screenshots/app-new-entry.svg)
 
 ### Password List
 ![Password List](assets/screenshots/password-list.svg)
@@ -99,8 +108,8 @@ vk cp github
 # Tired of typing the master password? Stay unlocked in this shell
 eval "$(vk unlock)"
 
-# Or use the menus
-vk interactive
+# Or open the full-screen app
+vk
 
 # Make a backup and keep it somewhere safe
 vk backup -o ~/vaultkey-backup.vkbak
@@ -219,20 +228,26 @@ vk export-passwords --format json -o export.json --include-passwords
 - **Duplicates:** several accounts for one site are all kept, as `Gmail`, `Gmail (bob)`, and so on. An import is saved in one step, and entries that already exist in your vault are skipped.
 - **Exports:** files are created readable by you only (mode 0600). Passwords are left out unless you pass `--include-passwords`. Delete plaintext exports as soon as you're done with them.
 
-### Interactive Mode
+### The App
 ```bash
-vk interactive
+vk                                                # Open the full-screen app
+vk interactive --lock-after 15                    # Lock after 15 idle minutes (0 = never)
 ```
 
-Arrow keys move, Enter selects, and typing filters long lists; Ctrl-C goes back. From the main menu you can:
+Entries are listed on the left with a coloured strength dot and any problems; the selected entry's details are on the right. Everything is a key away:
 
-- **Find an entry**: type part of a name, then copy the password or username, reveal it, edit, view its history, rename or delete it.
-- **Add an entry** with a generated or typed password.
-- **Generate a password** with adjustable length and character types.
-- **Security check**: every weak, reused or old password, with a shortcut to fix each one.
-- **Settings**: change the master password, create a backup, and see vault details.
+| Key | Action | Key | Action |
+|-----|--------|-----|--------|
+| `/` | Search | `n` | New entry |
+| `↑` `↓` | Move through entries | `e` | Edit (rename, new password, notes) |
+| `Enter` or `c` | Copy password | `d` | Delete |
+| `u` | Copy username | `h` | Password history |
+| `r` | Show / hide password | `g` | Password generator |
+| `f` | Only entries that need attention | `i` / `x` | Import / export |
+| `b` | Backup | `p` | Change master password |
+| `l` | Lock | `?` | All shortcuts |
 
-It uses your `vk unlock` session if there is one.
+`Ctrl+P` opens the command palette, which also lets you change the colour theme. The app uses your `vk unlock` session if there is one, and goes back to the lock screen after 5 idle minutes.
 
 ## 📂 Where Your Data Lives
 
@@ -310,7 +325,7 @@ Backups and encrypted exports use the same envelope.
 | `vk export-passwords` | Export passwords to a file |
 | `vk backup` | Create an encrypted backup file |
 | `vk restore` | Restore the vault from a backup |
-| `vk interactive` | Launch interactive mode |
+| `vk` / `vk interactive` | Open the full-screen app |
 | `vk version` | Show version information |
 
 ## 🐍 Python API
@@ -356,7 +371,7 @@ vaultkey/
 │   ├── __init__.py
 │   ├── __main__.py        # python -m vaultkey
 │   ├── cli.py             # Command-line interface
-│   ├── interactive.py     # Menu-driven interactive mode
+│   ├── app.py             # Full-screen app (Textual)
 │   ├── ui.py              # Shared terminal output (tables, colours, JSON)
 │   ├── session.py         # vk unlock / vk lock sessions
 │   ├── manager.py         # Vault operations, migration, backup/restore
@@ -411,7 +426,7 @@ If you discover a security vulnerability, please report it privately through a G
 - [x] Clipboard auto-clear that outlives the command
 - [x] Password generation, strength analysis and breach detection
 - [x] Import/export (CSV, JSON, LastPass, Bitwarden, 1Password, Chrome, KeePass)
-- [x] Interactive mode with arrow-key menus and search
+- [x] Full-screen app with search, shortcuts, import/export and auto-lock
 - [x] Session unlock (`vk unlock` / `vk lock`)
 - [x] `vk edit`, `vk rename` and `vk history`
 - [x] JSON output and shell completion
@@ -435,7 +450,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [HaveIBeenPwned](https://haveibeenpwned.com/) - Breach detection API
 - [Click](https://click.palletsprojects.com/) - CLI framework
 - [Rich](https://github.com/Textualize/rich) - Terminal formatting
-- [questionary](https://github.com/tmbo/questionary) - Interactive prompts
+- [Textual](https://github.com/Textualize/textual) - Full-screen terminal app
 
 ---
 

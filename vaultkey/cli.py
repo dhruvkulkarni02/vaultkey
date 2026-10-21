@@ -206,16 +206,23 @@ SITE_ARGUMENT = functools.partial(click.argument, 'site', shell_complete=complet
 
 # --- Commands ----------------------------------------------------------------
 
-@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+@click.group(context_settings={"help_option_names": ["-h", "--help"]}, invoke_without_command=True)
 @click.version_option(version=__version__, prog_name="VaultKey")
-def cli():
+@click.pass_context
+def cli(ctx):
     """VaultKey - a local, offline password manager
 
     Argon2id key derivation and AES-256-GCM encryption. Your passwords are
-    encrypted locally and never leave your device. Run 'vk unlock' to stay
-    unlocked between commands, or 'vk interactive' for a menu-driven interface.
+    encrypted locally and never leave your device.
+
+    Run 'vk' on its own to open the full-screen app, or use the commands below.
+    'vk unlock' keeps the vault unlocked between commands.
     """
-    pass
+    if ctx.invoked_subcommand is None:
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            ctx.invoke(interactive)
+        else:
+            click.echo(ctx.get_help())
 
 
 @cli.command()
@@ -1000,15 +1007,13 @@ def completion(shell):
 
 
 @cli.command()
-def interactive():
-    """Launch interactive mode with menus and search"""
-    from .interactive import run_interactive
+@click.option('--lock-after', default=5, type=click.IntRange(min=0), show_default=True,
+              help='Lock after this many idle minutes (0 = never)')
+def interactive(lock_after):
+    """Open the full-screen app (also what 'vk' on its own does)"""
+    from .app import run_app
 
-    pm = get_password_manager()
-    try:
-        run_interactive(pm)
-    finally:
-        pm.lock()
+    run_app(get_password_manager(), lock_after)
 
 
 @cli.command()

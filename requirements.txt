@@ -1,7 +1,7 @@
 cryptography
 click
 rich>=13.0.0
-questionary>=2.0.0
+textual>=1.0.0
 pyperclip
 requests
 argon2-cffi>=21.2.0
