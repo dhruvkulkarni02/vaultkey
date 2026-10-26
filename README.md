@@ -70,9 +70,16 @@ VaultKey keeps your passwords in a single encrypted file on your own machine and
 
 ## 📦 Installation
 
-### macOS, Linux, Windows: pip (recommended)
+### macOS and Linux: Homebrew (recommended)
 ```bash
-pip install "vaultkey-cli @ https://github.com/dhruvkulkarni02/vaultkey/releases/download/v2.1.0/vaultkey_cli-2.1.0-py3-none-any.whl"
+brew install dhruvkulkarni02/vaultkey/vaultkey
+```
+
+This installs the `vk` and `vaultkey` commands. Upgrade later with `brew upgrade vaultkey`. Apple Silicon Macs and Linux get a prebuilt package; Intel Macs build from source, which is slow, so pip is the better choice there.
+
+### Any platform: pip
+```bash
+pip install "vaultkey-cli @ https://github.com/dhruvkulkarni02/vaultkey/releases/download/v2.2.0/vaultkey_cli-2.2.0-py3-none-any.whl"
 ```
 
 Or install the latest source:
@@ -81,7 +88,7 @@ Or install the latest source:
 pip install git+https://github.com/dhruvkulkarni02/vaultkey.git
 ```
 
-Both need Python 3.9+, and install the `vaultkey` and `vk` commands. You can also run `python -m vaultkey`. On macOS, [pipx](https://pipx.pypa.io/) keeps VaultKey in its own environment: `pipx install` followed by the same URL.
+Both need Python 3.9+, and install the `vaultkey` and `vk` commands. You can also run `python -m vaultkey`. [pipx](https://pipx.pypa.io/) keeps VaultKey in its own environment: run `pipx install` with the same URL.
 
 ### Windows: standalone executable
 Download `VaultKey-Windows.zip` from the [latest release](https://github.com/dhruvkulkarni02/vaultkey/releases/latest), unzip it and run `VaultKey.bat`. Python is not required. The executable isn't code-signed, so SmartScreen may ask you to confirm the first time (**More info → Run anyway**).
