@@ -391,7 +391,8 @@ vaultkey/
 │   ├── breach.py          # Breach detection with HIBP
 │   └── portability.py     # Import/export
 ├── tests/                 # pytest suite
-├── .github/workflows/     # Tests, executable builds, release packages
+├── scripts/               # Download statistics
+├── .github/workflows/     # Tests, executable builds, release packages, daily stats
 ├── pyproject.toml
 ├── requirements.txt
 └── README.md
@@ -407,6 +408,16 @@ pytest
 ```
 
 Tests run with low Argon2 settings so they finish in seconds. CI runs them on Ubuntu, macOS and Windows with Python 3.9, 3.12 and 3.13.
+
+### Download Statistics
+
+Homebrew's analytics don't cover third-party taps, so GitHub release downloads stand in for installs: bottles on [homebrew-vaultkey](https://github.com/dhruvkulkarni02/homebrew-vaultkey/releases) (Apple Silicon and Linux) and the sdist, wheel and executables here (the sdist also counts Intel Homebrew builds). To print the current totals per repository (the traffic rows need push access to both repositories):
+
+```bash
+scripts/download-stats.sh | awk -F, '{sum[$2" "$3] += $5} END {for (k in sum) print k, sum[k]}' | sort
+```
+
+The [Download Stats](.github/workflows/stats.yml) workflow runs this daily and appends the rows to `stats/downloads.csv` on the [`stats`](https://github.com/dhruvkulkarni02/vaultkey/tree/stats) branch, since GitHub keeps clone and view counts for only 14 days. The traffic metrics need a repository secret named `STATS_TOKEN`: a fine-grained personal access token with access to both repositories and the **Administration: Read-only** permission. Without it the workflow records download counts only and logs a warning.
 
 ### Contributing
 

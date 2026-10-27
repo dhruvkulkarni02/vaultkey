@@ -1,0 +1,71 @@
+name: Download Stats
+
+# Once a day, append release download counts and 14-day traffic totals for
+# vaultkey and homebrew-vaultkey to stats/downloads.csv on the `stats` branch.
+# GitHub only keeps traffic data for 14 days, so this is the long-term record.
+#
+# Traffic metrics need the STATS_TOKEN repository secret: a fine-grained PAT
+# with read access to "Administration" on both repositories. Without it the
+# job records download counts only and logs a warning.
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: download-stats
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Check out the stats branch
+      run: |
+        if git ls-remote --exit-code --heads origin stats; then
+          git fetch --depth=1 origin +refs/heads/stats:refs/remotes/origin/stats
+          git worktree add -B stats stats-branch origin/stats
+        else
+          git worktree add --orphan -b stats stats-branch
+        fi
+
+    - name: Append today's rows
+      env:
+        GH_TOKEN: ${{ secrets.STATS_TOKEN || github.token }}
+        HAVE_STATS_TOKEN: ${{ secrets.STATS_TOKEN != '' }}
+      run: |
+        export STATS_DATE=$(date -u +%F)
+        args=()
+        if [ "$HAVE_STATS_TOKEN" != true ]; then
+          echo "::warning::STATS_TOKEN is not set; skipping clone and view metrics"
+          args=(--no-traffic)
+        fi
+
+        rows=$(scripts/download-stats.sh "${args[@]}")
+        csv=stats-branch/stats/downloads.csv
+        mkdir -p "$(dirname "$csv")"
+        [ -f "$csv" ] || echo "date,repo,metric,key,value" > "$csv"
+        # A second run on the same day replaces that day's rows.
+        grep -v "^$STATS_DATE," "$csv" > "$csv.tmp" || true
+        printf '%s\n' "$rows" >> "$csv.tmp"
+        mv "$csv.tmp" "$csv"
+        echo "$rows"
+
+    - name: Commit and push
+      working-directory: stats-branch
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add stats/downloads.csv
+        if git diff --cached --quiet; then
+          echo "No changes"
+        else
+          git commit -m "Download stats for $(date -u +%F)"
+          git push origin stats
+        fi
