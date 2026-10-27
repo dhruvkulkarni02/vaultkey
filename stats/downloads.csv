@@ -11,6 +11,14 @@ date,repo,metric,key,value
 2026-10-27,dhruvkulkarni02/vaultkey,downloads,v2.0.0/VaultKey-Windows.zip,0
 2026-10-27,dhruvkulkarni02/vaultkey,downloads,v2.0.0/vaultkey_cli-2.0.0-py3-none-any.whl,1
 2026-10-27,dhruvkulkarni02/vaultkey,downloads,v2.0.0/vaultkey_cli-2.0.0.tar.gz,0
+2026-10-27,dhruvkulkarni02/vaultkey,clones,14d,180
+2026-10-27,dhruvkulkarni02/vaultkey,clones_unique,14d,27
+2026-10-27,dhruvkulkarni02/vaultkey,views,14d,2
+2026-10-27,dhruvkulkarni02/vaultkey,views_unique,14d,1
 2026-10-27,dhruvkulkarni02/homebrew-vaultkey,downloads,vaultkey-2.2.0/vaultkey-2.2.0.arm64_tahoe.bottle.tar.gz,2
 2026-10-27,dhruvkulkarni02/homebrew-vaultkey,downloads,vaultkey-2.2.0/vaultkey-2.2.0.x86_64_linux.bottle.tar.gz,1
 2026-10-27,dhruvkulkarni02/homebrew-vaultkey,downloads,vaultkey-2.0.0/vaultkey-2.0.0.arm64_tahoe.bottle.tar.gz,0
+2026-10-27,dhruvkulkarni02/homebrew-vaultkey,clones,14d,36
+2026-10-27,dhruvkulkarni02/homebrew-vaultkey,clones_unique,14d,18
+2026-10-27,dhruvkulkarni02/homebrew-vaultkey,views,14d,0
+2026-10-27,dhruvkulkarni02/homebrew-vaultkey,views_unique,14d,0
