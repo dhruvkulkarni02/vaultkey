@@ -1,0 +1,16 @@
+date,repo,metric,key,value
+2026-10-27,dhruvkulkarni02/vaultkey,downloads,v2.2.0/VaultKey-Mac.zip,0
+2026-10-27,dhruvkulkarni02/vaultkey,downloads,v2.2.0/VaultKey-Windows.zip,0
+2026-10-27,dhruvkulkarni02/vaultkey,downloads,v2.2.0/vaultkey_cli-2.2.0-py3-none-any.whl,0
+2026-10-27,dhruvkulkarni02/vaultkey,downloads,v2.2.0/vaultkey_cli-2.2.0.tar.gz,5
+2026-10-27,dhruvkulkarni02/vaultkey,downloads,v2.1.0/VaultKey-Mac.zip,2
+2026-10-27,dhruvkulkarni02/vaultkey,downloads,v2.1.0/VaultKey-Windows.zip,0
+2026-10-27,dhruvkulkarni02/vaultkey,downloads,v2.1.0/vaultkey_cli-2.1.0-py3-none-any.whl,1
+2026-10-27,dhruvkulkarni02/vaultkey,downloads,v2.1.0/vaultkey_cli-2.1.0.tar.gz,1
+2026-10-27,dhruvkulkarni02/vaultkey,downloads,v2.0.0/VaultKey-Mac.zip,1
+2026-10-27,dhruvkulkarni02/vaultkey,downloads,v2.0.0/VaultKey-Windows.zip,0
+2026-10-27,dhruvkulkarni02/vaultkey,downloads,v2.0.0/vaultkey_cli-2.0.0-py3-none-any.whl,1
+2026-10-27,dhruvkulkarni02/vaultkey,downloads,v2.0.0/vaultkey_cli-2.0.0.tar.gz,0
+2026-10-27,dhruvkulkarni02/homebrew-vaultkey,downloads,vaultkey-2.2.0/vaultkey-2.2.0.arm64_tahoe.bottle.tar.gz,2
+2026-10-27,dhruvkulkarni02/homebrew-vaultkey,downloads,vaultkey-2.2.0/vaultkey-2.2.0.x86_64_linux.bottle.tar.gz,1
+2026-10-27,dhruvkulkarni02/homebrew-vaultkey,downloads,vaultkey-2.0.0/vaultkey-2.0.0.arm64_tahoe.bottle.tar.gz,0
