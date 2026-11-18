@@ -121,7 +121,9 @@ jobs:
     runs-on: ubuntu-latest
     
     permissions:
-      contents: write  # needed to upload release assets
+      contents: write      # needed to upload release assets
+      id-token: write      # needed to sign build provenance
+      attestations: write  # needed to publish build provenance
     
     steps:
     - name: Download all artifacts
@@ -202,6 +204,10 @@ jobs:
         zip -r VaultKey-Complete.zip VaultKey/
         cd VaultKey/Windows && zip -r ../../VaultKey-Windows.zip . && cd ../..
         cd VaultKey/Mac && zip -r ../../VaultKey-Mac.zip . && cd ../..
+
+        # Checksums, so downloads can be verified (see README)
+        sha256sum VaultKey-Windows.zip VaultKey-Mac.zip > SHA256SUMS.txt
+        cat SHA256SUMS.txt
     
     - name: Upload packages
       uses: actions/upload-artifact@v4
@@ -211,7 +217,18 @@ jobs:
           VaultKey-Complete.zip
           VaultKey-Windows.zip
           VaultKey-Mac.zip
+          SHA256SUMS.txt
         retention-days: 90
+
+    # Signed provenance linking each zip to this repository and workflow run:
+    # gh attestation verify VaultKey-Mac.zip --repo dhruvkulkarni02/vaultkey
+    - name: Attest build provenance
+      if: github.event_name == 'release'
+      uses: actions/attest-build-provenance@v2
+      with:
+        subject-path: |
+          VaultKey-Windows.zip
+          VaultKey-Mac.zip
     
     - name: Attach packages to the release
       if: github.event_name == 'release'
@@ -220,6 +237,6 @@ jobs:
       run: >-
         gh release upload
         '${{ github.event.release.tag_name }}'
-        VaultKey-Windows.zip VaultKey-Mac.zip
+        VaultKey-Windows.zip VaultKey-Mac.zip SHA256SUMS.txt
         --clobber
         --repo '${{ github.repository }}'

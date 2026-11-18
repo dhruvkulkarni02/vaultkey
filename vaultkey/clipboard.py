@@ -7,11 +7,11 @@ a one-shot command like `vk cp` has exited.
 import hashlib
 import hmac
 import json
-import os
 import secrets
-import subprocess
 import sys
 import time
+
+from .helpers import spawn_helper
 
 
 def copy_with_autoclear(text: str, timeout: int = 30) -> bool:
@@ -56,25 +56,7 @@ def _start_clearer(text: str, previous: str, timeout: int) -> None:
         "restore": previous,
     })
 
-    if getattr(sys, "frozen", False):
-        # PyInstaller build: the executable is the VaultKey CLI itself
-        command = [sys.executable, "_clear-clipboard"]
-    else:
-        command = [sys.executable, "-m", "vaultkey", "_clear-clipboard"]
-
-    kwargs = {}
-    if os.name == "nt":
-        kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        kwargs["start_new_session"] = True
-
-    process = subprocess.Popen(
-        command,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        **kwargs
-    )
+    process = spawn_helper("_clear-clipboard")
     process.stdin.write(payload.encode("utf-8"))
     process.stdin.close()
 

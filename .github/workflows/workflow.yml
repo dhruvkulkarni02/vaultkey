@@ -53,7 +53,9 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      contents: write  # needed to upload release assets
+      contents: write      # needed to upload release assets
+      id-token: write      # needed to sign build provenance
+      attestations: write  # needed to publish build provenance
 
     steps:
     - name: Download all the dists
@@ -61,6 +63,14 @@ jobs:
       with:
         name: python-package-distributions
         path: dist/
+
+    - name: Write checksums
+      run: cd dist && sha256sum * > SHA256SUMS-python.txt && cat SHA256SUMS-python.txt
+
+    - name: Attest build provenance
+      uses: actions/attest-build-provenance@v2
+      with:
+        subject-path: dist/vaultkey_cli-*
 
     - name: Upload to the release
       env:

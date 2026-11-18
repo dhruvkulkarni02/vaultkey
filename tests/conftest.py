@@ -19,6 +19,14 @@ def fast_kdf(monkeypatch):
     monkeypatch.setattr(crypto, "DEFAULT_KDF_PARAMS", FAST_KDF_PARAMS)
 
 
+@pytest.fixture(autouse=True)
+def end_sessions(tmp_path):
+    """Stop any session agent a test started: agents exit once their session file is gone"""
+    yield
+    for path in tmp_path.rglob("*.session"):
+        path.unlink()
+
+
 @pytest.fixture
 def vault_path(tmp_path):
     return str(tmp_path / "vault" / "passwords.encrypted")

@@ -91,14 +91,29 @@ pip install git+https://github.com/dhruvkulkarni02/vaultkey.git
 Both need Python 3.9+, and install the `vaultkey` and `vk` commands. You can also run `python -m vaultkey`. [pipx](https://pipx.pypa.io/) keeps VaultKey in its own environment: run `pipx install` with the same URL.
 
 ### Windows: standalone executable
-Download `VaultKey-Windows.zip` from the [latest release](https://github.com/dhruvkulkarni02/vaultkey/releases/latest), unzip it and run `VaultKey.bat`. Python is not required. The executable isn't code-signed, so SmartScreen may ask you to confirm the first time (**More info → Run anyway**).
+Download `VaultKey-Windows.zip` from the [latest release](https://github.com/dhruvkulkarni02/vaultkey/releases/latest), [verify it](#verifying-a-download), unzip it and run `VaultKey.bat`. Python is not required. The executable isn't code-signed, so SmartScreen may ask you to confirm the first time (**More info → Run anyway**).
 
 ### macOS: standalone executable (Apple Silicon)
-Download `VaultKey-Mac.zip` from the [latest release](https://github.com/dhruvkulkarni02/vaultkey/releases/latest) and unzip it. The app isn't signed by Apple, so macOS blocks it the first time. Either right-click `VaultKey.command` and choose **Open**, or clear the download flag in Terminal:
+Download `VaultKey-Mac.zip` from the [latest release](https://github.com/dhruvkulkarni02/vaultkey/releases/latest), [verify it](#verifying-a-download) and unzip it. The app isn't signed by Apple, so macOS blocks it the first time. Either right-click `VaultKey.command` and choose **Open**, or clear the download flag in Terminal:
 
 ```bash
 xattr -dr com.apple.quarantine ~/Downloads/VaultKey-Mac
 ```
+
+### Verifying a download
+Because the executables aren't signed, check that a download is the one GitHub built before you run it. Releases after 2.2.0 come with `SHA256SUMS.txt` and signed build provenance. In the folder you downloaded to:
+
+```bash
+shasum -a 256 -c SHA256SUMS.txt --ignore-missing
+```
+
+With the [GitHub CLI](https://cli.github.com/), this also confirms that the file was built by this repository's release workflow:
+
+```bash
+gh attestation verify VaultKey-Mac.zip --repo dhruvkulkarni02/vaultkey
+```
+
+Homebrew checks the checksum of everything it installs, so there's nothing extra to do there.
 
 ## 🚀 Quick Start
 
@@ -170,6 +185,8 @@ vk lock                                           # End the session for every sh
 ```
 
 `vk unlock` prints a line that sets `VAULTKEY_SESSION`; the `eval` runs it in your shell. Commands in that shell then work without the master password until the session has been idle for the timeout. In fish use `vk unlock | source`; in PowerShell, `vk unlock` prints a `$env:` line to run.
+
+Every program you start from that shell inherits `VAULTKEY_SESSION` and can use the vault while the session lasts, so run `vk lock` before running code you don't trust.
 
 ### Scripting and Shell Completion
 ```bash
@@ -263,7 +280,7 @@ Entries are listed on the left with a coloured strength dot and any problems; th
 | Vault | `~/.vaultkey/passwords.encrypted` |
 | Custom vault | Set `VAULTKEY_VAULT=/path/to/vault` |
 | Backups | Where you choose with `-o`; by default `vaultkey_backup_<timestamp>.vkbak` in the current directory |
-| Session | `~/.vaultkey/passwords.encrypted.session` while `vk unlock` is active |
+| Session | `~/.vaultkey/passwords.encrypted.session` while `vk unlock` is active. It holds only the address of the session agent, nothing secret |
 
 The vault is a single file. Copying it, together with your master password, is enough to open it anywhere.
 
@@ -275,7 +292,7 @@ The vault is a single file. Copying it, together with your master password, is e
 - **Nothing to check guesses against**: the only way to test a master password is to run Argon2id and attempt decryption
 - **Atomic, private files**: the vault and backups are written to a temporary file with mode 0600, flushed to disk, and renamed into place
 - **Clipboard**: clearing is handed to a small background process, which receives only a keyed fingerprint of the password, never the password itself
-- **Sessions**: `vk unlock` stores the vault key encrypted under a random token, in a 0600 file next to the vault. The token itself lives only in your shell's environment, so the file alone is useless. Sessions end after the idle timeout, on `vk lock`, and on `vk passwd`.
+- **Sessions**: `vk unlock` hands the vault key to a background agent that keeps it in memory only; nothing secret is written to disk. Commands get the key from the agent by proving they know the token in your shell's environment, without sending it. When the session ends (after the idle timeout, on `vk lock`, on `vk passwd`, or at restart) the agent exits and the key is gone.
 - **Lockout**: in interactive mode, 5 wrong passwords lock you out for 5 minutes. This is a convenience; offline guessing is limited by the cost of Argon2id.
 
 ### File format
@@ -298,7 +315,7 @@ Backups and encrypted exports use the same envelope.
 ### Core Commands
 | Command | Description |
 |---------|-------------|
-| `vk init` | Create a new password vault |
+| `vk init` | Create a new password vault (an existing one is renamed, not deleted) |
 | `vk add` | Add a new password entry |
 | `vk get` | Retrieve a password by site name |
 | `vk list` | Display all stored passwords |
@@ -380,11 +397,12 @@ vaultkey/
 │   ├── cli.py             # Command-line interface
 │   ├── app.py             # Full-screen app (Textual)
 │   ├── ui.py              # Shared terminal output (tables, colours, JSON)
-│   ├── session.py         # vk unlock / vk lock sessions
+│   ├── session.py         # vk unlock / vk lock sessions (in-memory agent)
 │   ├── manager.py         # Vault operations, migration, backup/restore
 │   ├── crypto.py          # Argon2id + AES-256-GCM envelope, 1.0.x decryption
 │   ├── storage.py         # Atomic, versioned file storage
 │   ├── clipboard.py       # Copy with auto-clear via a background helper
+│   ├── helpers.py         # Starts the detached helper processes
 │   ├── errors.py          # Exception types
 │   ├── generator.py       # Password generation
 │   ├── strength.py        # Password strength analysis

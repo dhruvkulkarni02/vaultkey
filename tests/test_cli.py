@@ -2,13 +2,14 @@ import importlib
 import io
 import json
 import os
+import subprocess
 import sys
 import types
 
 import pytest
 from click.testing import CliRunner
 
-from vaultkey import clipboard
+from vaultkey import clipboard, helpers
 
 # `vaultkey.cli` the attribute is the click group; we need the module
 cli_module = importlib.import_module("vaultkey.cli")
@@ -88,6 +89,29 @@ def test_init_warns_about_weak_master_password(run):
     assert "weak" in result.output
     result = run(["init"], secrets=["short", "short"], input="y\n")
     assert result.exit_code == 0, result.output
+
+
+def test_cancelled_init_keeps_the_existing_vault(run, vault_path):
+    init_vault(run)
+    add_entry(run)
+    result = run(["init"], secrets=[NEW_MASTER, "typo"], input="y\n")  # confirmation doesn't match
+    assert result.exit_code == 1
+    result = run(["get", "-s", "github.com", "--show"], secrets=[MASTER])
+    assert "gh-secret" in result.output
+
+
+def test_init_over_a_vault_keeps_the_old_one(run, vault_path):
+    init_vault(run)
+    add_entry(run)
+    result = run(["init"], secrets=[NEW_MASTER, NEW_MASTER], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert run(["list"], secrets=[NEW_MASTER]).exit_code == 0
+
+    old = [name for name in os.listdir(os.path.dirname(vault_path)) if ".replaced-" in name]
+    assert len(old) == 1 and old[0] in result.output.replace("\n", "")
+    result = run(["get", "-s", "github.com", "--show"], secrets=[MASTER],
+                 vault=os.path.join(os.path.dirname(vault_path), old[0]))
+    assert "gh-secret" in result.output
 
 
 def test_wrong_master_password_exits_nonzero(run):
@@ -412,10 +436,10 @@ def test_clearer_restores_previous_content_only_if_unchanged(monkeypatch):
             self.stdin = io.BytesIO()
             self.stdin.close = lambda: captured.__setitem__("payload", self.stdin.getvalue())
 
-    monkeypatch.setattr(clipboard.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(helpers.subprocess, "Popen", FakePopen)
     clipboard._start_clearer("secret", "previous", 0)
 
-    assert captured["command"][-1] == "_clear-clipboard"
+    assert "_clear-clipboard" in captured["command"][-1]
     payload = json.loads(captured["payload"])
     assert "secret" not in captured["payload"].decode()  # only a keyed fingerprint is passed
 
@@ -427,6 +451,19 @@ def test_clearer_restores_previous_content_only_if_unchanged(monkeypatch):
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
     clipboard.run_clearer()
     assert board["value"] == "something the user copied later"
+
+
+def test_helper_ignores_modules_in_the_working_directory(tmp_path):
+    # A pyperclip.py where the user happens to run `vk cp` must not be imported
+    (tmp_path / "pyperclip.py").write_text(
+        "open('PWNED', 'w').close()\n"
+        "def paste(): return ''\n"
+        "def copy(text): pass\n"
+    )
+    job = json.dumps({"timeout": 0, "key": "00", "fingerprint": "x", "restore": ""})
+    subprocess.run(helpers.helper_command("_clear-clipboard"), input=job.encode(),
+                   cwd=str(tmp_path), capture_output=True, timeout=60)
+    assert not (tmp_path / "PWNED").exists()
 
 
 def _json(result):

@@ -27,6 +27,7 @@ from .session import (
     SESSION_ENV,
     end_session,
     resume_session,
+    run_agent,
     session_expiry,
     start_session,
 )
@@ -230,26 +231,38 @@ def init():
     """Create a new password vault"""
     pm = get_password_manager()
 
-    if pm.storage.exists():
+    replacing = pm.storage.exists()
+    if replacing:
         ui.warning(f"A vault already exists at {user(pm.storage.filename)}")
-        if not click.confirm("Delete it and create a new, empty vault? This cannot be undone", default=False, err=True):
+        ui.info("It will be renamed, not deleted, so it can be recovered if this was a mistake.")
+        if not click.confirm("Start a new, empty vault in its place?", default=False, err=True):
             return
-
-        # Delete existing vault (and the salt file VaultKey 1.0 kept beside it)
-        pm.storage.delete()
-        end_session(pm.storage.filename)
-        if os.path.exists(pm.legacy_salt_file):
-            os.remove(pm.legacy_salt_file)
 
     ui.info("Choose a master password. It protects every entry and [bold]cannot be recovered[/] if you forget it.")
     password = prompt_new_master_password()
     if not password:
         sys.exit(1)
 
+    # Only now that the new vault is certain, move the old one (and the salt
+    # file VaultKey 1.0 kept beside it) out of the way
+    moved = []
+    if replacing:
+        suffix = f".replaced-{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        end_session(pm.storage.filename)
+        for path in (pm.storage.filename, pm.legacy_salt_file):
+            if os.path.exists(path):
+                os.replace(path, path + suffix)
+                moved.append((path, path + suffix))
+
     try:
         pm.create_vault(password)
     except (VaultError, ValueError, OSError) as e:
+        for original, renamed in moved:
+            os.replace(renamed, original)
         ui.fail(f"Could not create the vault: {user(e)}")
+    for original, renamed in moved:
+        if original == pm.storage.filename:
+            ui.info(f"Your old vault is at {user(renamed)}. Delete it once you're sure you don't need it.")
     ui.success(f"Vault created at {user(pm.storage.filename)}")
     ui.info("Add your first password with 'vk add', or try 'vk interactive'.")
 
@@ -943,6 +956,8 @@ def unlock(timeout, shell):
     unlock_with_password(pm)
     try:
         token = start_session(pm.crypto, pm.storage.filename, timeout)
+    except OSError as e:
+        ui.fail(f"Could not start the session: {user(e)}")
     finally:
         pm.lock()
 
@@ -1028,6 +1043,12 @@ def version():
 def clear_clipboard_helper():
     """Internal: clears the clipboard for secure_clipboard_copy()"""
     run_clearer()
+
+
+@cli.command('_session-agent', hidden=True)
+def session_agent():
+    """Internal: holds the vault key in memory for 'vk unlock'"""
+    run_agent()
 
 
 # Entry point

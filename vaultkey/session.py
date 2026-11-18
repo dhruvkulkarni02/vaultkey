@@ -1,29 +1,41 @@
 """
 session.py - Keep the vault unlocked between commands (`vk unlock` / `vk lock`)
 
-`vk unlock` derives the vault key once, encrypts it under a random session
-token, and writes the result next to the vault (owner-only). The token is
-printed for the user to export as VAULTKEY_SESSION. Later commands need both
-the file and the token, so the key is useless to anyone who only has the disk,
-and `vk lock` (or the inactivity timeout) ends the session for every shell.
+`vk unlock` hands the vault key to a small background agent process, which
+keeps it in memory only. Later commands fetch the key from the agent over a
+local socket (a named pipe on Windows) by proving, with a challenge-response,
+that they know the session token printed for VAULTKEY_SESSION; the token itself
+is never sent. The agent exits, and the key is gone, once the session has been
+idle for its timeout, on `vk lock`, or when the computer restarts.
+
+The only file is `<vault>.session`, which holds the agent's address and nothing
+secret. Removing it is how `vk lock` ends the session from any shell.
 """
 import base64
 import binascii
 import json
 import os
 import secrets
+import shutil
+import sys
+import tempfile
+import threading
 import time
+from multiprocessing.connection import (
+    AuthenticationError,
+    Client,
+    Listener,
+    answer_challenge,
+    deliver_challenge,
+)
 from typing import Optional
 
-from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
 from .crypto import Crypto
-from .storage import Storage
+from .helpers import spawn_helper
 
 SESSION_ENV = "VAULTKEY_SESSION"
 DEFAULT_TIMEOUT_MINUTES = 15
-_ASSOCIATED_DATA = b"vaultkey-session-v1"
+_WATCH_INTERVAL = 0.5  # seconds between the agent's checks for expiry and `vk lock`
 
 
 def session_file(vault_path: str) -> str:
@@ -31,9 +43,9 @@ def session_file(vault_path: str) -> str:
     return os.path.abspath(vault_path) + ".session"
 
 
-def start_session(crypto: Crypto, vault_path: str, timeout_minutes: int = DEFAULT_TIMEOUT_MINUTES) -> str:
+def start_session(crypto: Crypto, vault_path: str, timeout_minutes: float = DEFAULT_TIMEOUT_MINUTES) -> str:
     """
-    Store the vault key for later commands.
+    Start an agent holding the vault key, replacing any running session.
 
     Args:
         crypto: Crypto instance holding the unlocked vault's key
@@ -42,16 +54,28 @@ def start_session(crypto: Crypto, vault_path: str, timeout_minutes: int = DEFAUL
 
     Returns:
         The session token to export as VAULTKEY_SESSION
+
+    Raises:
+        OSError: The agent could not be started
     """
+    end_session(vault_path)
     token = secrets.token_bytes(32)
-    _write(token, vault_path, {
+    agent = spawn_helper("_session-agent", capture_output=True)
+    agent.stdin.write(json.dumps({
         "vault": os.path.abspath(vault_path),
+        "token": token.hex(),
         "key": base64.b64encode(crypto.key).decode(),
         "salt": base64.b64encode(crypto.salt).decode(),
         "kdf_params": crypto.kdf_params,
         "timeout": timeout_minutes * 60,
-        "expires": time.time() + timeout_minutes * 60,
-    })
+    }).encode("utf-8"))
+    agent.stdin.close()
+
+    # The agent reports once it is listening and has written the session file
+    ready = agent.stdout.readline()
+    agent.stdout.close()
+    if ready.strip() != b"ready":
+        raise OSError("Could not start the session agent")
     return base64.urlsafe_b64encode(token).decode()
 
 
@@ -61,59 +85,134 @@ def resume_session(vault_path: str, token: Optional[str] = None) -> Optional[Cry
 
     Each successful use extends the session by its timeout.
     """
-    token = token if token is not None else os.environ.get(SESSION_ENV)
-    path = session_file(vault_path)
-    if not token or not os.path.exists(path):
+    reply = _request(vault_path, token, b"key")
+    if reply is None:
         return None
-
-    try:
-        raw_token = base64.urlsafe_b64decode(token.encode())
-        blob = Storage(path).load()[1]
-        session = json.loads(AESGCM(raw_token).decrypt(blob[:12], blob[12:], _ASSOCIATED_DATA))
-    except (ValueError, binascii.Error, InvalidTag):
-        return None  # Token from another session, or a damaged file
-
-    if session.get("vault") != os.path.abspath(vault_path):
-        return None
-    if time.time() > session["expires"]:
-        end_session(vault_path)
-        return None
-
-    session["expires"] = time.time() + session["timeout"]
-    _write(raw_token, vault_path, session)
-
     crypto = Crypto()
-    crypto.key = base64.b64decode(session["key"])
-    crypto.salt = base64.b64decode(session["salt"])
-    crypto.kdf_params = session["kdf_params"]
+    crypto.key = base64.b64decode(reply["key"])
+    crypto.salt = base64.b64decode(reply["salt"])
+    crypto.kdf_params = reply["kdf_params"]
     return crypto
 
 
 def session_expiry(vault_path: str, token: Optional[str] = None) -> Optional[float]:
     """Expiry time of the active session (without extending it), or None"""
-    token = token if token is not None else os.environ.get(SESSION_ENV)
-    path = session_file(vault_path)
-    if not token or not os.path.exists(path):
-        return None
-    try:
-        blob = Storage(path).load()[1]
-        session = json.loads(AESGCM(base64.urlsafe_b64decode(token.encode())).decrypt(
-            blob[:12], blob[12:], _ASSOCIATED_DATA))
-    except (ValueError, binascii.Error, InvalidTag):
-        return None
-    return session["expires"] if session["expires"] > time.time() else None
+    reply = _request(vault_path, token, b"status")
+    return reply["expires"] if reply else None
 
 
 def end_session(vault_path: str) -> bool:
-    """Delete the session file. Returns True if a session existed."""
-    path = session_file(vault_path)
-    if os.path.exists(path):
-        os.remove(path)
+    """End the session by removing its file; the agent notices and exits. Returns True if one existed."""
+    try:
+        os.remove(session_file(vault_path))
         return True
-    return False
+    except FileNotFoundError:
+        return False
 
 
-def _write(token: bytes, vault_path: str, session: dict) -> None:
-    nonce = os.urandom(12)
-    ciphertext = AESGCM(token).encrypt(nonce, json.dumps(session).encode(), _ASSOCIATED_DATA)
-    Storage(session_file(vault_path)).save(nonce + ciphertext)
+def _request(vault_path: str, token: Optional[str], request: bytes) -> Optional[dict]:
+    """Send one request to the vault's agent, or return None if there is no usable session"""
+    token = token if token is not None else os.environ.get(SESSION_ENV)
+    if not token:
+        return None
+    try:
+        with open(session_file(vault_path), encoding="utf-8") as f:
+            address = json.load(f)
+        authkey = base64.urlsafe_b64decode(token.encode())
+        with Client(address["address"], address["family"], authkey=authkey) as conn:
+            conn.send_bytes(request)
+            reply = json.loads(conn.recv_bytes().decode("utf-8"))
+    except (OSError, EOFError, AuthenticationError, ValueError, KeyError, TypeError, binascii.Error):
+        return None  # No session, an agent that has exited, or a token from another session
+    if reply.get("vault") != os.path.abspath(vault_path):
+        return None
+    return reply
+
+
+# --- The agent process ------------------------------------------------------------
+
+def run_agent() -> None:
+    """Agent entry point (`vk _session-agent`): read the job from stdin and serve the key"""
+    job = json.loads(sys.stdin.read())
+    authkey = bytes.fromhex(job.pop("token"))
+    path = session_file(job["vault"])
+    state = {"expires": time.time() + job["timeout"]}
+    lock = threading.Lock()
+
+    if os.name == "nt":
+        family, directory = "AF_PIPE", None
+        address = r"\\.\pipe\vaultkey-" + secrets.token_hex(16)
+    else:
+        family, directory = "AF_UNIX", tempfile.mkdtemp(prefix="vaultkey-")  # 0700
+        address = os.path.join(directory, "agent.sock")
+    # No authkey here: each connection is authenticated in its own thread, so
+    # a client that stalls mid-handshake can't block the others
+    listener = Listener(address, family)
+    marker = json.dumps({"address": address, "family": family, "pid": os.getpid()})
+    _write_private(path, marker)
+
+    def stop() -> None:
+        try:
+            with open(path, encoding="utf-8") as f:
+                if f.read() == marker:
+                    os.remove(path)
+        except OSError:
+            pass
+        if directory:
+            shutil.rmtree(directory, ignore_errors=True)
+        os._exit(0)
+
+    def watch() -> None:
+        # Exit once the session is idle too long, or `vk lock` (or a new
+        # `vk unlock`) has removed or replaced our session file
+        while True:
+            time.sleep(_WATCH_INTERVAL)
+            try:
+                with open(path, encoding="utf-8") as f:
+                    current = f.read()
+            except OSError:
+                current = None
+            with lock:
+                if current != marker or time.time() > state["expires"]:
+                    stop()
+
+    def serve(conn) -> None:
+        try:
+            deliver_challenge(conn, authkey)
+            answer_challenge(conn, authkey)
+            request = conn.recv_bytes(64)
+            with lock:
+                if time.time() > state["expires"]:
+                    stop()
+                if request == b"key":
+                    state["expires"] = time.time() + job["timeout"]
+                    reply = dict(job, expires=state["expires"])
+                elif request == b"status":
+                    reply = {"vault": job["vault"], "expires": state["expires"]}
+                else:
+                    return
+            conn.send_bytes(json.dumps(reply).encode("utf-8"))
+        except (OSError, EOFError, AuthenticationError):
+            pass
+        finally:
+            conn.close()
+
+    threading.Thread(target=watch, daemon=True).start()
+    sys.stdout.write("ready\n")
+    sys.stdout.flush()
+    sys.stdout.close()
+
+    while True:
+        try:
+            conn = listener.accept()
+        except OSError:
+            continue
+        threading.Thread(target=serve, args=(conn,), daemon=True).start()
+
+
+def _write_private(path: str, text: str) -> None:
+    """Write a small owner-only (0600) file"""
+    fd = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with open(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(path + ".tmp", path)
