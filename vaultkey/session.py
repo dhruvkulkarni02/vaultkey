@@ -104,7 +104,7 @@ def session_expiry(vault_path: str, token: Optional[str] = None) -> Optional[flo
 def end_session(vault_path: str) -> bool:
     """End the session by removing its file; the agent notices and exits. Returns True if one existed."""
     try:
-        os.remove(session_file(vault_path))
+        _retry(os.remove, session_file(vault_path))
         return True
     except FileNotFoundError:
         return False
@@ -154,8 +154,9 @@ def run_agent() -> None:
     def stop() -> None:
         try:
             with open(path, encoding="utf-8") as f:
-                if f.read() == marker:
-                    os.remove(path)
+                ours = f.read() == marker
+            if ours:
+                _retry(os.remove, path)
         except OSError:
             pass
         if directory:
@@ -170,8 +171,10 @@ def run_agent() -> None:
             try:
                 with open(path, encoding="utf-8") as f:
                     current = f.read()
-            except OSError:
+            except FileNotFoundError:
                 current = None
+            except OSError:
+                continue  # Briefly locked by another process (Windows); look again
             with lock:
                 if current != marker or time.time() > state["expires"]:
                     stop()
@@ -215,4 +218,19 @@ def _write_private(path: str, text: str) -> None:
     fd = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with open(fd, "w", encoding="utf-8") as f:
         f.write(text)
-    os.replace(path + ".tmp", path)
+    _retry(os.replace, path + ".tmp", path)
+
+
+def _retry(operation, *args):
+    """
+    Run a file operation, retrying briefly on Windows, where removing or
+    replacing a file fails while another process (the agent checking its
+    session file, or a command reading it) has it open.
+    """
+    for attempt in range(40):
+        try:
+            return operation(*args)
+        except PermissionError:
+            if os.name != "nt" or attempt == 39:
+                raise
+            time.sleep(0.05)
