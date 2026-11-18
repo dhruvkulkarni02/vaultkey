@@ -11,6 +11,13 @@ VaultKey keeps your passwords in a single encrypted file on your own machine and
 
 ## ✨ What's New
 
+### 2.2.1: security fixes
+
+- **Sessions keep the key in memory only**: `vk unlock` now hands the vault key to a background agent instead of writing it to disk. If you used `vk unlock` with 2.2.0, run `vk lock` once to remove the old session file.
+- **`vk init` no longer deletes an existing vault** before the new one is created; the old vault is renamed aside.
+- **The clipboard helper ignores the current directory**, so a stray `pyperclip.py` or `click.py` where you run `vk cp` can't run code.
+- **Release downloads come with `SHA256SUMS.txt` and signed build provenance** (see [Verifying a download](#verifying-a-download)).
+
 ### 2.2: a full-screen app
 
 - **Run `vk` on its own** to open a full-screen terminal app: entries on the left, details on the right, a live search box, and one-key shortcuts for everything.
@@ -79,7 +86,7 @@ This installs the `vk` and `vaultkey` commands. Upgrade later with `brew upgrade
 
 ### Any platform: pip
 ```bash
-pip install "vaultkey-cli @ https://github.com/dhruvkulkarni02/vaultkey/releases/download/v2.2.0/vaultkey_cli-2.2.0-py3-none-any.whl"
+pip install "vaultkey-cli @ https://github.com/dhruvkulkarni02/vaultkey/releases/download/v2.2.1/vaultkey_cli-2.2.1-py3-none-any.whl"
 ```
 
 Or install the latest source:
