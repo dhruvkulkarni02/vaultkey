@@ -42,6 +42,7 @@ def fake_clipboard(monkeypatch):
         paste=lambda: board["value"],
     )
     monkeypatch.setitem(sys.modules, "pyperclip", module)
+    monkeypatch.setattr(clipboard, "copy_concealed", lambda text: False)  # never the real clipboard
     started = []
     monkeypatch.setattr(clipboard, "_start_clearer",
                         lambda text, previous, timeout: started.append((text, previous, timeout)))
@@ -363,6 +364,27 @@ def test_backup_with_session_asks_for_a_backup_password(run, tmp_path):
     assert os.path.exists(backup)
 
 
+def test_backup_and_restore_read_the_password_from_stdin(run, tmp_path):
+    init_vault(run)
+    add_entry(run)
+    backup = str(tmp_path / "vault.vkbak")
+    result = run(["backup", "-o", backup, "--password-stdin"], secrets=[MASTER], input="from-stdin\n")
+    assert result.exit_code == 0, result.output
+    run(["delete", "github.com", "-f"], secrets=[MASTER])
+
+    result = run(["restore", backup, "--password-stdin", "-y"], secrets=[MASTER], input="from-stdin\n")
+    assert result.exit_code == 0, result.output
+    assert "gh-secret" in run(["get", "-s", "github.com", "--show"], secrets=[MASTER]).output
+
+
+def test_password_option_still_works_but_warns(run, tmp_path):
+    init_vault(run)
+    backup = str(tmp_path / "vault.vkbak")
+    result = run(["backup", "-o", backup, "-p", "on-the-command-line"], secrets=[MASTER])
+    assert result.exit_code == 0, result.output
+    assert "--password-stdin" in result.output
+
+
 def test_restore_with_wrong_backup_password_fails_cleanly(run, tmp_path):
     init_vault(run)
     add_entry(run)
@@ -382,6 +404,31 @@ def test_import_csv_by_header(run, tmp_path):
     assert result.exit_code == 0, result.output
     result = run(["get", "-s", "GitHub", "--show"], secrets=[MASTER])
     assert "s3cret" in result.output
+
+
+def test_entry_names_cannot_send_terminal_escapes(run, tmp_path):
+    init_vault(run)
+    csv_file = tmp_path / "evil.csv"
+    csv_file.write_text("site,username,password,notes\n"
+                        "bank\x1b]0;owned\x1b\\,me\x1b[2J,pw,note\u202etxt.exe\n")
+    assert run(["import-passwords", str(csv_file)], secrets=[MASTER]).exit_code == 0
+    for args in (["list", "-v"], ["search", "bank"], ["get", "-s", "bank"]):
+        result = run(args, secrets=[MASTER])
+        assert result.exit_code == 0, result.output
+        assert "\x1b" not in result.output and "\u202e" not in result.output
+        assert "bank" in result.output
+
+
+def test_json_export_leaves_out_old_passwords(run, tmp_path):
+    init_vault(run)
+    add_entry(run, password="old-secret")
+    run(["edit", "github.com", "-g"], secrets=[MASTER])
+    out = str(tmp_path / "export.json")
+    result = run(["export-passwords", "-f", "json", "-o", out, "--include-passwords"], secrets=[MASTER])
+    assert result.exit_code == 0, result.output
+    with open(out) as f:
+        data = f.read()
+    assert "old-secret" not in data and "github.com" in data
 
 
 def test_passwd_changes_master_password(run):

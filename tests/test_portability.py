@@ -69,6 +69,23 @@ def test_export_file_is_owner_only(tmp_path):
     assert stat.S_IMODE(os.stat(out).st_mode) == 0o600
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permissions and symlinks")
+def test_export_over_existing_file_or_symlink_is_owner_only(tmp_path):
+    existing = tmp_path / "existing.csv"
+    existing.write_text("old")
+    os.chmod(existing, 0o644)
+    VaultExporter().export_passwords(PASSWORDS, "csv", str(existing))
+    assert stat.S_IMODE(os.stat(existing).st_mode) == 0o600
+
+    target = tmp_path / "elsewhere.txt"
+    target.write_text("untouched")
+    link = tmp_path / "link.csv"
+    link.symlink_to(target)
+    VaultExporter().export_passwords(PASSWORDS, "csv", str(link))
+    assert target.read_text() == "untouched"  # the link was replaced, not followed
+    assert not link.is_symlink() and stat.S_IMODE(os.stat(link).st_mode) == 0o600
+
+
 def test_json_export_import_roundtrip(tmp_path):
     out = str(tmp_path / "export.json")
     VaultExporter().export_passwords(PASSWORDS, "json", out)

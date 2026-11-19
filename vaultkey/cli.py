@@ -628,7 +628,8 @@ def export_passwords(pm, file_format, output, include_passwords):
     export_data = {}
     for site in sites:
         entry = pm.get_password(site)
-        export_data[site] = dict(entry) if include_passwords else {
+        # Old passwords (history) stay in the vault
+        export_data[site] = {k: v for k, v in entry.items() if k != 'history'} if include_passwords else {
             'username': entry.get('username', ''),
             'notes': entry.get('notes', ''),
             'password': '***HIDDEN***',
@@ -831,16 +832,34 @@ def breaches(pm, site, verbose):
         ui.success("None of your passwords were found in known breaches.")
 
 
+def password_from_options(password: Optional[str], password_stdin: bool) -> Optional[str]:
+    """The password given with --password-stdin (first line of stdin) or the deprecated --password"""
+    if password_stdin:
+        return sys.stdin.readline().rstrip("\r\n") or None
+    if password:
+        ui.warning("--password is visible to other programs and saved in your shell history. "
+                   "Use --password-stdin instead.")
+    return password
+
+
+PASSWORD_STDIN_OPTION = functools.partial(
+    click.option, '--password-stdin', is_flag=True,
+    help='Read the backup password from the first line of stdin (for scripts)')
+# Deprecated: a password in argv is visible in `ps` and the shell history
+PASSWORD_OPTION = functools.partial(click.option, '--password', '-p', hidden=True)
+
+
 @cli.command()
-@click.option('--password', '-p', help='Backup password (avoid: it ends up in your shell history)')
+@PASSWORD_STDIN_OPTION()
+@PASSWORD_OPTION()
 @click.option('--output', '-o', help='Backup file path (default: auto-generate)')
-def backup(password, output):
+def backup(password_stdin, password, output):
     """Create secure encrypted backup of your vault"""
     pm = get_password_manager()
+    backup_password = password_from_options(password, password_stdin)
     master_password = open_vault(pm)
 
     try:
-        backup_password = password
         if not backup_password:
             if master_password and click.confirm("Protect the backup with your master password?", default=True, err=True):
                 backup_password = master_password
@@ -861,17 +880,20 @@ def backup(password, output):
 
 @cli.command()
 @click.argument('backup_file', type=click.Path(exists=True, dir_okay=False))
-@click.option('--password', '-p', help='Backup password (avoid: it ends up in your shell history)')
-def restore(backup_file, password):
+@PASSWORD_STDIN_OPTION()
+@PASSWORD_OPTION()
+@click.option('--yes', '-y', is_flag=True, help="Don't ask before replacing the current vault")
+def restore(backup_file, password_stdin, password, yes):
     """Restore vault from secure backup"""
     pm = get_password_manager()
+    backup_password = password_from_options(password, password_stdin)
 
-    if pm.storage.exists():
+    if pm.storage.exists() and not yes:
         ui.warning("This replaces everything in your current vault with the backup.")
         if not click.confirm("Continue?", default=False, err=True):
             return
 
-    backup_password = password or getpass.getpass("Backup password: ")
+    backup_password = backup_password or getpass.getpass("Backup password: ")
     if not backup_password:
         ui.fail("Restore cancelled")
 

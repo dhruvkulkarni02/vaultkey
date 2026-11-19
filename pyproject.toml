@@ -48,13 +48,13 @@ classifiers = [
 ]
 requires-python = ">=3.9"
 dependencies = [
-    "cryptography>=41.0.0",
+    "cryptography>=44.0.1",
     "click>=8.0.0",
     "rich>=13.0.0",
     "textual>=1.0.0",
     "pyperclip>=1.8.0",
     "argon2-cffi>=21.2.0",
-    "requests>=2.25.0",
+    "requests>=2.32.4",
 ]
 
 [project.optional-dependencies]

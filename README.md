@@ -217,7 +217,7 @@ vk restore ~/vault.vkbak                          # Restore, also onto a new mac
 
 When you restore onto a machine with no vault, VaultKey asks for a master password for the restored vault. When a vault exists, the restored data keeps its current master password. Backups keep the password they were made with, even after you run `vk passwd`.
 
-> Prefer typing backup passwords at the prompt. The `-p/--password` option is supported for scripts, but it leaves the password in your shell history.
+> In scripts, pass the backup password on stdin with `--password-stdin` (`vk restore` also takes `-y` to skip its confirmation). The old `-p/--password` option still works but warns: a password on the command line is visible to other programs and saved in your shell history.
 
 ### Security Features
 ```bash
@@ -298,9 +298,11 @@ The vault is a single file. Copying it, together with your master password, is e
 - **Self-describing header**: the KDF settings and salt are stored in the vault and authenticated with the ciphertext, so changing them is detected. Absurd settings in a crafted file are rejected before any work is done.
 - **Nothing to check guesses against**: the only way to test a master password is to run Argon2id and attempt decryption
 - **Atomic, private files**: the vault and backups are written to a temporary file with mode 0600, flushed to disk, and renamed into place
-- **Clipboard**: clearing is handed to a small background process, which receives only a keyed fingerprint of the password, never the password itself
+- **Clipboard**: clearing is handed to a small background process, which receives only a keyed fingerprint of the password, never the password itself. On macOS and Windows, copied passwords are marked as secret, so clipboard history (Win+V), clipboard managers and syncing to your other devices skip them. On Linux, clipboard managers may still keep a copy.
+- **Safe output**: control characters in entry names, usernames and notes are shown as `�`, so an imported file can't send escape sequences to your terminal
+- **Private exports**: export files are created owner-only (0600), replacing any existing file or symlink rather than writing through it, and never include old passwords
 - **Sessions**: `vk unlock` hands the vault key to a background agent that keeps it in memory only; nothing secret is written to disk. Commands get the key from the agent by proving they know the token in your shell's environment, without sending it. When the session ends (after the idle timeout, on `vk lock`, on `vk passwd`, or at restart) the agent exits and the key is gone.
-- **Lockout**: in interactive mode, 5 wrong passwords lock you out for 5 minutes. This is a convenience; offline guessing is limited by the cost of Argon2id.
+- **Lockout**: in the app, 5 wrong passwords lock you out for 5 minutes. Single `vk` commands don't count failures across runs: a lockout counter on disk could simply be deleted by anyone able to run `vk` as you, and offline guessing is limited by the cost of Argon2id either way.
 
 ### File format
 

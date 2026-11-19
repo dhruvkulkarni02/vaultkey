@@ -345,7 +345,7 @@ class VaultScreen(Screen):
         for site in self.visible_sites:
             info = self.infos[site]
             colour = ui.strength_label(info.score)[1]
-            entry = Text(site, style="bold", no_wrap=True, overflow="ellipsis")
+            entry = Text(ui.clean(site), style="bold", no_wrap=True, overflow="ellipsis")
             entry.append("\n" + (info.username or "—"), style="dim")
             # The most important issue, and how many more there are
             issues = Text(justify="right")
@@ -404,24 +404,24 @@ class VaultScreen(Screen):
         grid = Table.grid(padding=(0, 2))
         grid.add_column(style="dim", justify="right")
         grid.add_column()
-        grid.add_row("Username", Text(entry.get("username", "") or "—", style="cyan"))
-        grid.add_row("Password", Text(entry["password"], style="bold yellow") if self.reveal
+        grid.add_row("Username", Text(ui.clean(entry.get("username", "")) or "—", style="cyan"))
+        grid.add_row("Password", Text(ui.clean(entry["password"]), style="bold yellow") if self.reveal
                      else Text("•" * 12 + "   r to show", style="default"))
         grid.add_row("Strength", strength_meter(info.score))
         if entry.get("notes"):
-            grid.add_row("Notes", Text(entry["notes"]))
+            grid.add_row("Notes", Text(ui.clean(entry["notes"])))
         grid.add_row("Created", Text(entry.get("created", "")[:10] or "—"))
         grid.add_row("Modified", Text(f"{entry.get('modified', '')[:10]}  ({ui.format_age(info.age_days)})"))
         history = entry.get("history", [])
         grid.add_row("History", Text(f"{len(history)} previous password(s)" + ("   h to view" if history else "")))
 
-        parts = [Text(site, style="bold"), Text(""), grid]
+        parts = [Text(ui.clean(site), style="bold"), Text(""), grid]
         if info.issues:
             advice = []
             if info.score < 60:
                 advice.append("This password is weak.")
             if info.reused_with:
-                advice.append(f"Same password as {', '.join(info.reused_with)}.")
+                advice.append(ui.clean(f"Same password as {', '.join(info.reused_with)}."))
             if info.old:
                 advice.append(f"Not changed for {ui.format_age(info.age_days).replace(' ago', '')}.")
             parts += [Text(""), issue_badges(info), Text(" ".join(advice) + " Press e to change it.", style="dim")]
@@ -467,12 +467,12 @@ class VaultScreen(Screen):
     def action_copy_password(self) -> None:
         site = self.current_site()
         if site:
-            copy_text(self.app, self.pm.get_password(site)["password"], f"Password for {site}")
+            copy_text(self.app, self.pm.get_password(site)["password"], f"Password for {ui.clean(site)}")
 
     def action_copy_username(self) -> None:
         site = self.current_site()
         if site:
-            copy_text(self.app, self.pm.get_password(site).get("username", ""), f"Username for {site}")
+            copy_text(self.app, self.pm.get_password(site).get("username", ""), f"Username for {ui.clean(site)}")
 
     def action_reveal(self) -> None:
         if not self.current_site():
@@ -524,9 +524,9 @@ class VaultScreen(Screen):
             self.notify(str(e), title="Not saved", severity="error")
             return
         self.refresh_entries(select=site)
-        self.notify(f"Saved {site}")
+        self.notify(f"Saved {ui.clean(site)}")
         if self.infos[site].reused_with:
-            self.notify(f"{site} shares its password with {', '.join(self.infos[site].reused_with)}.",
+            self.notify(ui.clean(f"{site} shares its password with {', '.join(self.infos[site].reused_with)}."),
                         severity="warning")
 
     def action_delete(self) -> None:
@@ -538,9 +538,9 @@ class VaultScreen(Screen):
             if yes:
                 self.pm.delete_password(site)
                 self.refresh_entries()
-                self.notify(f"Deleted {site}")
+                self.notify(f"Deleted {ui.clean(site)}")
 
-        self.app.push_screen(ConfirmScreen(f"Delete {site}?", "Its password and history are removed for good.",
+        self.app.push_screen(ConfirmScreen(f"Delete {ui.clean(site)}?", "Its password and history are removed for good.",
                                            "Delete"), confirmed)
 
     def action_history(self) -> None:
@@ -702,7 +702,7 @@ class EntryFormScreen(Dialog):
         if not site:
             return self.show_error("Enter a site or service name")
         if site != self.original_site and site in self.existing_sites:
-            return self.show_error(f"An entry named {site} already exists. Edit that one, or pick another name.")
+            return self.show_error(f"An entry named {ui.clean(site)} already exists. Edit that one, or pick another name.")
         if not password:
             return self.show_error("Enter a password, or press Generate")
         self.dismiss({
@@ -793,7 +793,7 @@ class HistoryScreen(Dialog):
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog wide"):
-            yield Static(Text.assemble(("Password history · ", "bold"), (self.site, "bold")), classes="dialog-title")
+            yield Static(Text.assemble(("Password history · ", "bold"), (ui.clean(self.site), "bold")), classes="dialog-title")
             if self.history:
                 yield DataTable(id="history", cursor_type="row")
                 yield Static("r show/hide · c copy the selected password · Esc close", classes="hint")
@@ -812,7 +812,7 @@ class HistoryScreen(Dialog):
         table.clear(columns=True)
         table.add_columns("#", "Password", "In use from", "Replaced")
         for number, item in enumerate(self.history, 1):
-            table.add_row(str(number), Text(item["password"], style="yellow") if self.reveal else "••••••••••••",
+            table.add_row(str(number), Text(ui.clean(item["password"]), style="yellow") if self.reveal else "••••••••••••",
                           item.get("changed", "")[:10], item.get("retired", "")[:10])
 
     def action_reveal(self) -> None:

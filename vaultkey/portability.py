@@ -5,6 +5,7 @@ Supports CSV, JSON, and encrypted VaultKey format
 import csv
 import json
 import os
+import tempfile
 from typing import Dict, List, Optional
 from datetime import datetime
 import base64
@@ -384,10 +385,7 @@ class VaultExporter:
             raise ValueError(f"Unsupported export format: {format_type}")
         
         if filepath:
-            # Exports may contain plaintext passwords: create the file owner-only
-            fd = os.open(filepath, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with open(fd, 'w', encoding='utf-8', newline='') as f:
-                f.write(data)
+            _write_private_file(filepath, data)
             return f"Exported to {filepath}"
         else:
             return data
@@ -493,6 +491,26 @@ class VaultExporter:
             ])
         
         return output.getvalue()
+
+
+def _write_private_file(path: str, text: str) -> None:
+    """
+    Write a file only its owner can read (exports may hold plaintext passwords).
+
+    The data goes to a new 0600 file that then replaces `path`, so an existing
+    file's looser permissions aren't kept, and a symlink at `path` is replaced
+    rather than followed.
+    """
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, temp_path = tempfile.mkstemp(prefix=".vaultkey-export-", suffix=".tmp", dir=directory)
+    try:
+        with open(fd, 'w', encoding='utf-8', newline='') as f:
+            f.write(text)
+        os.replace(temp_path, path)
+    except BaseException:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise
 
 
 # Example usage and testing

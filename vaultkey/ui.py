@@ -5,6 +5,7 @@ Data (tables, passwords, JSON) goes to stdout; status messages go to stderr, so
 `vk ... --json` output can be piped. Colour follows the terminal and NO_COLOR.
 """
 import json
+import re
 import sys
 from datetime import datetime
 from typing import Any, Optional, Tuple
@@ -21,9 +22,21 @@ MASK = "••••••••"
 OLD_AFTER_DAYS = 90
 
 
+# Control characters (ESC starts terminal escape sequences, which could retitle
+# the terminal, clear it or write to the clipboard) and bidirectional overrides
+# (which can disguise a name). Tabs and newlines are kept.
+_UNSAFE_CHARACTERS = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+
+
+def clean(text: Any) -> str:
+    """Text safe to print to a terminal: unsafe characters are shown as \ufffd"""
+    return _UNSAFE_CHARACTERS.sub("\ufffd", str(text))
+
+
 def user(text: Any) -> str:
-    """Escape user-provided text so rich doesn't treat [brackets] as markup"""
-    return escape(str(text))
+    """Make user-provided text safe to print: no control characters, and
+    [brackets] that rich won't treat as markup"""
+    return escape(clean(text))
 
 
 def success(message: str) -> None:

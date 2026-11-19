@@ -67,11 +67,14 @@ def test_tampered_header_is_rejected():
         Crypto.from_envelope("hunter2-but-longer", tampered)
 
 
-def test_absurd_kdf_parameters_are_refused_before_deriving():
-    envelope = _rewrite_header(
-        make_crypto().encrypt("x"),
-        lambda h: h["kdf_params"].update(memory_cost=2 ** 31),
-    )
+@pytest.mark.parametrize("change", [
+    {"memory_cost": 2 ** 31},
+    {"memory_cost": 2 * 1024 * 1024},  # 2 GiB: more than a crafted file may demand
+    {"time_cost": 64},
+    {"parallelism": 64},
+])
+def test_absurd_kdf_parameters_are_refused_before_deriving(change):
+    envelope = _rewrite_header(make_crypto().encrypt("x"), lambda h: h["kdf_params"].update(change))
     with pytest.raises(VaultFormatError):
         Crypto.from_envelope("hunter2-but-longer", envelope)
 

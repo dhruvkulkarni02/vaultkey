@@ -29,9 +29,9 @@ DEFAULT_KDF_PARAMS = {
 # Bounds applied to parameters read from a file, so a crafted header can't make
 # us allocate gigabytes of memory or spin for hours before failing.
 _KDF_LIMITS = {
-    "time_cost": (1, 64),
-    "memory_cost": (8 * 1024, 4 * 1024 * 1024),  # 8 MiB .. 4 GiB
-    "parallelism": (1, 64),
+    "time_cost": (1, 16),
+    "memory_cost": (8 * 1024, 1024 * 1024),  # 8 MiB .. 1 GiB
+    "parallelism": (1, 16),
 }
 
 SALT_SIZE = 32
