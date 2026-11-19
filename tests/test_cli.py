@@ -410,7 +410,7 @@ def test_entry_names_cannot_send_terminal_escapes(run, tmp_path):
     init_vault(run)
     csv_file = tmp_path / "evil.csv"
     csv_file.write_text("site,username,password,notes\n"
-                        "bank\x1b]0;owned\x1b\\,me\x1b[2J,pw,note\u202etxt.exe\n")
+                        "bank\x1b]0;owned\x1b\\,me\x1b[2J,pw,note\u202etxt.exe\n", encoding="utf-8")
     assert run(["import-passwords", str(csv_file)], secrets=[MASTER]).exit_code == 0
     for args in (["list", "-v"], ["search", "bank"], ["get", "-s", "bank"]):
         result = run(args, secrets=[MASTER])
